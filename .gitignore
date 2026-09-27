@@ -14,3 +14,4 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+results/
