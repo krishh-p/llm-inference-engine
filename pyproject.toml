@@ -1,0 +1,19 @@
+[project]
+name = "llm-inference-engine"
+version = "0.1.0"
+description = "A from-scratch LLM inference runtime and serving systems lab"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "modal",
+    "numpy",
+    "matplotlib",
+    "safetensors",
+    "huggingface-hub",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "ipython",
+]

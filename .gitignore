@@ -1,0 +1,16 @@
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.DS_Store
+.env
+.env.*
+!.env.example
+.modal.toml
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
