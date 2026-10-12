@@ -1,0 +1,367 @@
+{
+  "format_version": 1,
+  "model": {
+    "id": "Qwen/Qwen3-1.7B-Base",
+    "revision": "ea980cb0a6c2ae4b936e82123acc929f1cec04c1",
+    "dtype": "float32"
+  },
+  "prompt": "The capital of France is",
+  "token_ids": [
+    785,
+    6722,
+    315,
+    9625,
+    374
+  ],
+  "positions": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "expected_greedy_token_ids": [
+    12095,
+    13,
+    12095,
+    374
+  ],
+  "max_logit_diff_vs_hugging_face": 2.288818359375e-05,
+  "max_logit_diff_tolerance": 0.001,
+  "files": {
+    "rms_norm.safetensors": {
+      "tensors": {
+        "input": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "weight": {
+          "shape": [
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "eps": {
+          "shape": [],
+          "dtype": "float32"
+        },
+        "output": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        }
+      },
+      "bytes": 90388,
+      "sha256": "290e164e9b18d3145347e54fa9071057d6d97f2297bf69a737699002eae31e5a"
+    },
+    "rope.safetensors": {
+      "tensors": {
+        "q_input": {
+          "shape": [
+            16,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "k_input": {
+          "shape": [
+            8,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "positions": {
+          "shape": [
+            5
+          ],
+          "dtype": "int64"
+        },
+        "theta": {
+          "shape": [],
+          "dtype": "float32"
+        },
+        "cos": {
+          "shape": [
+            5,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "sin": {
+          "shape": [
+            5,
+            64
+          ],
+          "dtype": "float32"
+        },
+        "q_output": {
+          "shape": [
+            16,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "k_output": {
+          "shape": [
+            8,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        }
+      },
+      "tolerances": {
+        "rotation_atol": 1e-05,
+        "table_atol": 0.01
+      },
+      "bytes": 126052,
+      "sha256": "342fc0636dc64256c144bcf638d56385d7c73080e0259e17f5794945150720c9"
+    },
+    "block_0.safetensors": {
+      "tensors": {
+        "input": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "input_norm": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "q": {
+          "shape": [
+            16,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "k": {
+          "shape": [
+            8,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "v": {
+          "shape": [
+            8,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "q_rope": {
+          "shape": [
+            16,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "k_rope": {
+          "shape": [
+            8,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "attention_output": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "mlp_input": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "mlp_output": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "output": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "float32"
+        }
+      },
+      "bytes": 389936,
+      "sha256": "ffa21b569be323b3f7bf55618d57210c329e6d01dc03ac5f01617391152e66b4"
+    },
+    "decode_block_0.safetensors": {
+      "tensors": {
+        "token_id": {
+          "shape": [
+            1
+          ],
+          "dtype": "int64"
+        },
+        "positions": {
+          "shape": [
+            1
+          ],
+          "dtype": "int64"
+        },
+        "input": {
+          "shape": [
+            1,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "input_norm": {
+          "shape": [
+            1,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "q": {
+          "shape": [
+            16,
+            1,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "k": {
+          "shape": [
+            8,
+            1,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "v": {
+          "shape": [
+            8,
+            1,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "q_rope": {
+          "shape": [
+            16,
+            1,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "k_rope": {
+          "shape": [
+            8,
+            1,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "cache_k_in": {
+          "shape": [
+            8,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "cache_v_in": {
+          "shape": [
+            8,
+            5,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "cache_k_out": {
+          "shape": [
+            8,
+            6,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "cache_v_out": {
+          "shape": [
+            8,
+            6,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "attention_output": {
+          "shape": [
+            1,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "mlp_input": {
+          "shape": [
+            1,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "mlp_output": {
+          "shape": [
+            1,
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "output": {
+          "shape": [
+            1,
+            2048
+          ],
+          "dtype": "float32"
+        }
+      },
+      "bytes": 169200,
+      "sha256": "e5397576078a4e6ea34f9619d6a05ad78ad69509998d9d02a9b9784482c9193d"
+    },
+    "generation.safetensors": {
+      "tensors": {
+        "final_norm": {
+          "shape": [
+            2048
+          ],
+          "dtype": "float32"
+        },
+        "prefill_logits": {
+          "shape": [
+            151936
+          ],
+          "dtype": "float32"
+        }
+      },
+      "bytes": 616096,
+      "sha256": "ebdd78e475a1d025c9e1442cf629bc3f0af79ff3c5209f7b782b0e1b7b7eb19a"
+    }
+  }
+}

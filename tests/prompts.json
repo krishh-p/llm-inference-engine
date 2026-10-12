@@ -1,0 +1,10 @@
+{
+  "max_new_tokens": 8,
+  "prompts": [
+    "The capital of France is",
+    "2 + 2 =",
+    "Once upon a time",
+    "def fibonacci(n):",
+    "The opposite of hot is"
+  ]
+}

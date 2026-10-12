@@ -6,41 +6,25 @@ from pathlib import Path
 
 import modal
 
+import modal_common
+
 APP_NAME = "llm-inference-engine-dev"
-MODEL_NAME = "Qwen/Qwen3-1.7B-Base"
-HF_CACHE_PATH = "/cache/huggingface"
 PROMPT = "The capital of France is"
 BYTES_PER_GIB = 1024**3
 
+PROJECT_ROOT = modal_common.find_project_root(__file__)
+MODEL_REVISION_PATH, MODEL_REVISION = modal_common.load_model_revision(PROJECT_ROOT)
+
 app = modal.App(APP_NAME)
 
-hf_cache = modal.Volume.from_name(
-    "llm-inference-engine-hf-cache",
-    create_if_missing=True,
-)
-
-image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .uv_pip_install(
-        "torch==2.14.0",
-        "transformers==4.57.6",
-        "safetensors==0.8.0",
-        "huggingface-hub==0.36.2",
-        "accelerate==1.15.0",
-    )
-    .env(
-        {
-            "HF_HOME": HF_CACHE_PATH,
-            "HF_XET_HIGH_PERFORMANCE": "1",
-        }
-    )
-)
+hf_cache = modal_common.hugging_face_cache()
+image = modal_common.make_image(MODEL_REVISION_PATH)
 
 
 @app.function(
     image=image,
     gpu="L4",
-    volumes={HF_CACHE_PATH: hf_cache},
+    volumes={modal_common.HF_CACHE_PATH: hf_cache},
     timeout=600,
 )
 def smoke_test() -> dict[str, object]:
@@ -63,9 +47,13 @@ def smoke_test() -> dict[str, object]:
 
     load_started = time.perf_counter()
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(
+        modal_common.MODEL_NAME,
+        revision=MODEL_REVISION,
+    )
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        modal_common.MODEL_NAME,
+        revision=MODEL_REVISION,
         dtype=torch.bfloat16,
         device_map="auto",
     )
@@ -117,7 +105,8 @@ def smoke_test() -> dict[str, object]:
     total_remote_seconds = time.perf_counter() - remote_started
 
     return {
-        "model": MODEL_NAME,
+        "model": modal_common.MODEL_NAME,
+        "model_revision": MODEL_REVISION,
         "gpu": gpu_name,
         "cuda": cuda_version,
         "pytorch": torch_version,
