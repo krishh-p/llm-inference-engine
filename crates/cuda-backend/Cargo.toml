@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 cuda-kernels = { path = "../cuda-kernels" }
+engine-core = { path = "../engine-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

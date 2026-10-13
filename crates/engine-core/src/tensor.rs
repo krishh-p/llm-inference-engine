@@ -154,9 +154,44 @@ pub struct OwnedTensor {
     pub bytes: Vec<u8>,
 }
 
+impl OwnedTensor {
+    /// Decodes a float32 tensor from its little-endian `SafeTensors` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor is not float32 or its byte length does
+    /// not match its shape.
+    pub fn to_f32_vec(&self) -> crate::Result<Vec<f32>> {
+        if self.descriptor.layout.dtype != DType::Float32 {
+            return Err(crate::EngineError::TensorDtype {
+                name: self.descriptor.name.clone(),
+                expected: "float32",
+                actual: self.descriptor.layout.dtype.to_string(),
+            });
+        }
+
+        let expected = self.descriptor.layout.element_count() * size_of::<f32>();
+        if self.bytes.len() != expected {
+            return Err(crate::EngineError::TensorDataLength {
+                name: self.descriptor.name.clone(),
+                expected,
+                actual: self.bytes.len(),
+            });
+        }
+
+        let (values, _) = self.bytes.as_chunks::<{ size_of::<f32>() }>();
+        Ok(values
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DType, TensorLayout};
+    use std::path::PathBuf;
+
+    use super::{BufferOwner, DType, Device, OwnedTensor, TensorDescriptor, TensorLayout};
 
     #[test]
     fn creates_row_major_strides() {
@@ -170,5 +205,21 @@ mod tests {
         let layout = TensorLayout::contiguous(DType::Float32, vec![]);
         assert_eq!(layout.strides, Vec::<usize>::new());
         assert_eq!(layout.element_count(), 1);
+    }
+
+    #[test]
+    fn decodes_float32_tensor_bytes() {
+        let tensor = OwnedTensor {
+            descriptor: TensorDescriptor {
+                name: "values".to_owned(),
+                layout: TensorLayout::contiguous(DType::Float32, vec![2]),
+                device: Device::Cpu,
+                owner: BufferOwner::ModelFile(PathBuf::from("fixture.safetensors")),
+                byte_len: 8,
+            },
+            bytes: [1.5_f32.to_le_bytes(), (-2.25_f32).to_le_bytes()].concat(),
+        };
+
+        assert_eq!(tensor.to_f32_vec().unwrap(), vec![1.5, -2.25]);
     }
 }

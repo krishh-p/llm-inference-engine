@@ -39,6 +39,20 @@ pub enum EngineError {
     #[error("tensor {0:?} was not found")]
     TensorNotFound(String),
 
+    #[error("tensor {name:?} has dtype {actual}, expected {expected}")]
+    TensorDtype {
+        name: String,
+        expected: &'static str,
+        actual: String,
+    },
+
+    #[error("tensor {name:?} has {actual} data bytes, expected {expected}")]
+    TensorDataLength {
+        name: String,
+        expected: usize,
+        actual: usize,
+    },
+
     #[error("unsupported fixture manifest version {0}")]
     FixtureVersion(u32),
 

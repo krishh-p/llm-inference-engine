@@ -398,6 +398,7 @@ dependencies = [
  "cuda-core",
  "cuda-kernels",
  "cutile",
+ "engine-core",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

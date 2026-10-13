@@ -52,6 +52,11 @@ image = (
         f"{REMOTE_ROOT}/rust-toolchain.toml",
         copy=True,
     )
+    .add_local_file(
+        PROJECT_ROOT / "tests/fixtures/rms_norm.safetensors",
+        f"{REMOTE_ROOT}/tests/fixtures/rms_norm.safetensors",
+        copy=True,
+    )
     .add_local_dir(PROJECT_ROOT / "crates", f"{REMOTE_ROOT}/crates", copy=True)
     .run_commands(
         f"cd {REMOTE_ROOT} && cargo clippy --locked --release "
@@ -121,10 +126,16 @@ def main() -> None:
     output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     vector_add = result["vector_add"]
+    rms_norm = result["rms_norm"]
     gpu = result["gpu"]
     print("Rust CUDA smoke test passed")
     print(f"gpu: {gpu['name']} ({gpu['compute_capability']})")
     print(f"first_run_ms: {vector_add['first_run_ms']:.3f}")
     print(f"warm_run_ms: {vector_add['warm_run_ms']:.3f}")
     print(f"max_abs_error: {vector_add['max_abs_error']}")
+    for case in rms_norm["cases"]:
+        print(
+            f"rms_norm_{case['dtype']}_{case['hidden_size']}: "
+            f"max_abs_error={case['max_abs_error']}"
+        )
     print(f"result_json: {output_path}")

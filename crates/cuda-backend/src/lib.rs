@@ -1,10 +1,18 @@
+use std::path::Path;
+
 use serde::Serialize;
 use thiserror::Error;
 
-const VECTOR_ELEMENTS: usize = 4096;
-const TILE_ELEMENTS: usize = 256;
+mod rms_norm;
+
 #[cfg(target_os = "linux")]
-const MAX_ABS_ERROR: f32 = 1.0e-6;
+mod gpu;
+
+const VECTOR_ELEMENTS: usize = 4096;
+const VECTOR_TILE_ELEMENTS: usize = 256;
+// Only power-of-two widths up to 2048 have been run on the GPU so far. This is
+// the validated range, not a known cuTile limit.
+const MAX_RMS_NORM_HIDDEN_SIZE: usize = 2048;
 
 /// GPU information captured by the smoke test.
 #[derive(Debug, Serialize)]
@@ -28,19 +36,46 @@ pub struct VectorAddResult {
     pub passed: bool,
 }
 
+/// Correctness data for one `RMSNorm` shape and dtype.
+#[derive(Debug, Serialize)]
+pub struct RmsNormCaseResult {
+    pub name: &'static str,
+    pub source: &'static str,
+    pub dtype: &'static str,
+    pub rows: usize,
+    pub hidden_size: usize,
+    pub epsilon: f32,
+    pub max_abs_error: f32,
+    pub tolerance: f32,
+    pub passed: bool,
+}
+
+/// `RMSNorm` correctness results.
+#[derive(Debug, Serialize)]
+pub struct RmsNormResult {
+    pub cases: Vec<RmsNormCaseResult>,
+}
+
 /// Complete output from the Rust CUDA smoke test.
 #[derive(Debug, Serialize)]
 pub struct SmokeReport {
     pub gpu: GpuInfo,
     pub cutile_version: &'static str,
     pub vector_add: VectorAddResult,
+    pub rms_norm: RmsNormResult,
 }
 
-/// Errors raised while checking the CUDA runtime or running the smoke kernel.
+/// Errors raised while checking the CUDA runtime or running a kernel.
 #[derive(Debug, Error)]
 pub enum BackendError {
-    #[error("element count must be a non-zero multiple of {TILE_ELEMENTS}, got {0}")]
+    #[error("element count must be a non-zero multiple of {VECTOR_TILE_ELEMENTS}, got {0}")]
     InvalidElementCount(usize),
+
+    #[error("RMSNorm needs at least one row and one hidden element, got [{rows}, {hidden_size}]")]
+    InvalidRmsNormShape { rows: usize, hidden_size: usize },
+
+    #[error("RMSNorm supports power-of-two hidden sizes up to {MAX_RMS_NORM_HIDDEN_SIZE}, got {0}")]
+    UnsupportedHiddenSize(usize),
 
     #[error("the CUDA backend requires Linux")]
     UnsupportedPlatform,
@@ -51,163 +86,64 @@ pub enum BackendError {
     #[error("cuTile failed: {0}")]
     Cutile(String),
 
-    #[error("vector add max error {max_abs_error} exceeds {tolerance}")]
-    VerificationFailed { max_abs_error: f32, tolerance: f32 },
+    #[error("invalid RMSNorm fixture: {0}")]
+    RmsNormFixture(String),
+
+    #[error("{case} returned {actual} values, expected {expected}")]
+    OutputLength {
+        case: String,
+        expected: usize,
+        actual: usize,
+    },
+
+    #[error("{case} max error {max_abs_error} exceeds {tolerance}")]
+    VerificationFailed {
+        case: String,
+        max_abs_error: f32,
+        tolerance: f32,
+    },
+
+    #[error(transparent)]
+    Engine(#[from] engine_core::EngineError),
 }
 
-/// Finds the first GPU and runs the verified vector-add smoke kernel.
+/// Finds the first GPU and runs the verified smoke kernels.
 ///
 /// # Errors
 ///
-/// Returns an error when CUDA is unavailable or the kernel fails verification.
-pub fn run_smoke() -> Result<SmokeReport, BackendError> {
+/// Returns an error when the fixture is invalid, CUDA is unavailable or a
+/// kernel fails verification.
+pub fn run_smoke(rms_norm_fixture: impl AsRef<Path>) -> Result<SmokeReport, BackendError> {
     check_element_count(VECTOR_ELEMENTS)?;
-    run_smoke_on_gpu()
+    let fixture = rms_norm::load_fixture(rms_norm_fixture.as_ref())?;
+    run_smoke_on_gpu(fixture)
 }
 
 fn check_element_count(elements: usize) -> Result<(), BackendError> {
-    if elements == 0 || !elements.is_multiple_of(TILE_ELEMENTS) {
+    if elements == 0 || !elements.is_multiple_of(VECTOR_TILE_ELEMENTS) {
         return Err(BackendError::InvalidElementCount(elements));
     }
     Ok(())
 }
 
+fn check_rms_norm_shape(rows: usize, hidden_size: usize) -> Result<(), BackendError> {
+    if rows == 0 || hidden_size == 0 {
+        return Err(BackendError::InvalidRmsNormShape { rows, hidden_size });
+    }
+    if !hidden_size.is_power_of_two() || hidden_size > MAX_RMS_NORM_HIDDEN_SIZE {
+        return Err(BackendError::UnsupportedHiddenSize(hidden_size));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
-fn run_smoke_on_gpu() -> Result<SmokeReport, BackendError> {
-    gpu::run_smoke()
+fn run_smoke_on_gpu(fixture: rms_norm::RmsNormF32Case) -> Result<SmokeReport, BackendError> {
+    gpu::run_smoke(fixture)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run_smoke_on_gpu() -> Result<SmokeReport, BackendError> {
+fn run_smoke_on_gpu(_fixture: rms_norm::RmsNormF32Case) -> Result<SmokeReport, BackendError> {
     Err(BackendError::UnsupportedPlatform)
-}
-
-#[cfg(target_os = "linux")]
-mod gpu {
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    use cuda_core::CudaContext;
-    use cuda_kernels::vector_add;
-    use cutile::prelude::*;
-
-    use super::{
-        BackendError, GpuInfo, MAX_ABS_ERROR, SmokeReport, TILE_ELEMENTS, VECTOR_ELEMENTS,
-        VectorAddResult,
-    };
-
-    pub(super) fn run_smoke() -> Result<SmokeReport, BackendError> {
-        let visible_device_count = Device::device_count().map_err(cuda_error)?;
-        if visible_device_count == 0 {
-            return Err(BackendError::Cuda("no CUDA devices are visible".to_owned()));
-        }
-
-        let context = CudaContext::new(0).map_err(cuda_error)?;
-        let name = context.device_name().map_err(cuda_error)?;
-        let (major, minor) = context.compute_capability().map_err(cuda_error)?;
-        let compute_capability = format!("sm_{major}{minor}");
-
-        let result = run_vector_add(VECTOR_ELEMENTS)?;
-
-        Ok(SmokeReport {
-            gpu: GpuInfo {
-                name,
-                ordinal: context.ordinal(),
-                compute_capability,
-                visible_device_count,
-            },
-            cutile_version: "0.4.0",
-            vector_add: result,
-        })
-    }
-
-    /// Runs vector add once through the JIT path and once through the warm path.
-    fn run_vector_add(elements: usize) -> Result<VectorAddResult, BackendError> {
-        let left_host = Arc::new(
-            (0_u8..17)
-                .cycle()
-                .map(f32::from)
-                .take(elements)
-                .collect::<Vec<_>>(),
-        );
-        let right_host = Arc::new(
-            (0_u8..13)
-                .cycle()
-                .map(f32::from)
-                .take(elements)
-                .collect::<Vec<_>>(),
-        );
-
-        let device = Device::new(0).map_err(cutile_error)?;
-        let stream = device.new_stream().map_err(cutile_error)?;
-
-        let buffer_setup_started = Instant::now();
-        let left = api::copy_host_vec_to_device(&left_host)
-            .sync_on(&stream)
-            .map_err(cutile_error)?;
-        let right = api::copy_host_vec_to_device(&right_host)
-            .sync_on(&stream)
-            .map_err(cutile_error)?;
-        let mut output = api::zeros::<f32>(&[elements])
-            .sync_on(&stream)
-            .map_err(cutile_error)?;
-        let buffer_setup_ms = elapsed_ms(buffer_setup_started);
-
-        let first_run_started = Instant::now();
-        let _ = vector_add((&mut output).partition([TILE_ELEMENTS]), &left, &right)
-            .sync_on(&stream)
-            .map_err(cutile_error)?;
-        let first_run_ms = elapsed_ms(first_run_started);
-
-        let warm_run_started = Instant::now();
-        let _ = vector_add((&mut output).partition([TILE_ELEMENTS]), &left, &right)
-            .sync_on(&stream)
-            .map_err(cutile_error)?;
-        let warm_run_ms = elapsed_ms(warm_run_started);
-
-        let download_started = Instant::now();
-        let output_host = output
-            .to_host_vec()
-            .sync_on(&stream)
-            .map_err(cutile_error)?;
-        let download_ms = elapsed_ms(download_started);
-
-        let max_abs_error = output_host
-            .iter()
-            .zip(left_host.iter().zip(right_host.iter()))
-            .map(|(actual, (left, right))| (actual - (left + right)).abs())
-            .fold(0.0_f32, f32::max);
-
-        if max_abs_error > MAX_ABS_ERROR {
-            return Err(BackendError::VerificationFailed {
-                max_abs_error,
-                tolerance: MAX_ABS_ERROR,
-            });
-        }
-
-        Ok(VectorAddResult {
-            elements,
-            tile_elements: TILE_ELEMENTS,
-            buffer_setup_ms,
-            first_run_ms,
-            warm_run_ms,
-            download_ms,
-            max_abs_error,
-            passed: true,
-        })
-    }
-
-    fn elapsed_ms(started: Instant) -> f64 {
-        started.elapsed().as_secs_f64() * 1_000.0
-    }
-
-    fn cuda_error(error: impl std::fmt::Display) -> BackendError {
-        BackendError::Cuda(error.to_string())
-    }
-
-    fn cutile_error(error: impl std::fmt::Display) -> BackendError {
-        BackendError::Cutile(error.to_string())
-    }
 }
 
 #[cfg(test)]
@@ -215,7 +151,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_empty_input() {
+    fn rejects_empty_vector_input() {
         assert!(matches!(
             check_element_count(0),
             Err(BackendError::InvalidElementCount(0))
@@ -223,10 +159,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_partial_tile() {
+    fn rejects_partial_vector_tile() {
         assert!(matches!(
-            check_element_count(TILE_ELEMENTS + 1),
+            check_element_count(VECTOR_TILE_ELEMENTS + 1),
             Err(BackendError::InvalidElementCount(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_qwen3_hidden_size() {
+        assert!(check_rms_norm_shape(5, 2048).is_ok());
+    }
+
+    #[test]
+    fn rejects_odd_hidden_size() {
+        assert!(matches!(
+            check_rms_norm_shape(1, 257),
+            Err(BackendError::UnsupportedHiddenSize(257))
         ));
     }
 }
