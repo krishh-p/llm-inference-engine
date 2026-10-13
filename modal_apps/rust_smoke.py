@@ -64,9 +64,10 @@ image = (
     .add_local_dir(PROJECT_ROOT / "crates", f"{REMOTE_ROOT}/crates", copy=True)
     .run_commands(
         f"cd {REMOTE_ROOT} && cargo clippy --locked --release "
-        "-p cuda-backend -p cuda-kernels --all-targets -- -D warnings && "
+        "-p cuda-backend -p cuda-kernels --features cuda-backend/cuda "
+        "--all-targets -- -D warnings && "
         f"cd {REMOTE_ROOT} && cargo build --locked --release "
-        "-p cuda-backend --bin cuda-smoke"
+        "-p cuda-backend --features cuda-backend/cuda --bin cuda-smoke"
     )
 )
 
@@ -357,6 +358,8 @@ def main() -> None:
             f"median_ms={benchmark['median_ms']:.4f}, "
             f"bandwidth_gbps={benchmark['effective_bandwidth_gbps']:.2f}"
         )
+    for case in result["matmul"]["cases"]:
+        print(f"matmul_{case['name']}: max_abs_error={case['max_abs_error']}")
     pytorch = result["pytorch_benchmark"]
     print(f"pytorch_eager_median_ms: {pytorch['eager']['median_ms']:.4f}")
     if pytorch["compiled"]["available"]:

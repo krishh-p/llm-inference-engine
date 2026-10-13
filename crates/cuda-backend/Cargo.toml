@@ -4,16 +4,17 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+cuda = ["dep:cuda-core", "dep:cutile", "cuda-kernels/cuda"]
+
 [dependencies]
+cuda-core = { workspace = true, optional = true }
 cuda-kernels = { path = "../cuda-kernels" }
+cutile = { workspace = true, optional = true }
 engine-core = { path = "../engine-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-cuda-core.workspace = true
-cutile.workspace = true
 
 [lints]
 workspace = true

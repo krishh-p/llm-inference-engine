@@ -3,9 +3,12 @@ use std::path::Path;
 use serde::Serialize;
 use thiserror::Error;
 
+mod matmul;
 mod rms_norm;
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "cuda")]
+mod cublas;
+#[cfg(feature = "cuda")]
 mod gpu;
 
 const VECTOR_ELEMENTS: usize = 4096;
@@ -68,6 +71,24 @@ pub struct RmsNormResult {
     pub cases: Vec<RmsNormCaseResult>,
 }
 
+/// Correctness data for one cuBLAS matrix multiplication.
+#[derive(Debug, Serialize)]
+pub struct MatmulCaseResult {
+    pub name: &'static str,
+    pub left_shape: [usize; 2],
+    pub right_shape: [usize; 2],
+    pub right_transposed: bool,
+    pub max_abs_error: f32,
+    pub tolerance: f32,
+    pub passed: bool,
+}
+
+/// cuBLAS matrix multiplication results.
+#[derive(Debug, Serialize)]
+pub struct MatmulResult {
+    pub cases: Vec<MatmulCaseResult>,
+}
+
 /// Complete output from the Rust CUDA smoke test.
 #[derive(Debug, Serialize)]
 pub struct SmokeReport {
@@ -75,6 +96,7 @@ pub struct SmokeReport {
     pub cutile_version: &'static str,
     pub vector_add: VectorAddResult,
     pub rms_norm: RmsNormResult,
+    pub matmul: MatmulResult,
 }
 
 /// Errors raised while checking the CUDA runtime or running a kernel.
@@ -91,14 +113,34 @@ pub enum BackendError {
     )]
     UnsupportedHiddenSize(usize),
 
-    #[error("the CUDA backend requires Linux")]
-    UnsupportedPlatform,
+    #[error(
+        "matmul shapes do not agree: left {left:?}, right {right:?}, output {output:?}, right transposed: {right_transposed}"
+    )]
+    MatmulShape {
+        left: Vec<i32>,
+        right: Vec<i32>,
+        output: Vec<i32>,
+        right_transposed: bool,
+    },
+
+    #[error("matmul needs a contiguous row-major {0} matrix")]
+    NonContiguousMatrix(&'static str),
+
+    #[error("this build has no CUDA support; rebuild with the cuda feature")]
+    CudaDisabled,
 
     #[error("CUDA setup failed: {0}")]
     Cuda(String),
 
     #[error("cuTile failed: {0}")]
     Cutile(String),
+
+    #[error("cuBLAS {operation} failed with {name} ({code})")]
+    Cublas {
+        operation: &'static str,
+        name: &'static str,
+        code: i32,
+    },
 
     #[error("invalid RMSNorm fixture: {0}")]
     RmsNormFixture(String),
@@ -154,14 +196,14 @@ fn check_rms_norm_shape(rows: usize, hidden_size: usize) -> Result<(), BackendEr
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "cuda")]
 fn run_smoke_on_gpu(fixtures: rms_norm::RmsNormFixtures) -> Result<SmokeReport, BackendError> {
     gpu::run_smoke(fixtures)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(feature = "cuda"))]
 fn run_smoke_on_gpu(_fixtures: rms_norm::RmsNormFixtures) -> Result<SmokeReport, BackendError> {
-    Err(BackendError::UnsupportedPlatform)
+    Err(BackendError::CudaDisabled)
 }
 
 #[cfg(test)]

@@ -4,8 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-cutile.workspace = true
+[features]
+cuda = ["dep:cutile"]
+
+[dependencies]
+cutile = { workspace = true, optional = true }
 
 [lints]
 workspace = true

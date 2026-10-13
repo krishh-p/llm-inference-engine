@@ -1,12 +1,13 @@
-//! cuTile kernels. They are compiled only on Linux, where the CUDA toolkit exists.
+//! cuTile kernels. They are compiled only with the `cuda` feature, which needs
+//! the CUDA toolkit.
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "cuda")]
 pub use kernels::{
     rms_norm_kernel::{rms_norm_bf16, rms_norm_f32},
     vector_add_kernel::vector_add,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "cuda")]
 mod kernels {
     #[cutile::module]
     pub mod rms_norm_kernel {

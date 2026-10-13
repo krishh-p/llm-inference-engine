@@ -6,13 +6,20 @@ use cuda_kernels::{rms_norm_bf16, rms_norm_f32, vector_add};
 use cutile::half::bf16;
 use cutile::prelude::*;
 
+use crate::cublas::CublasHandle;
+use crate::matmul::{plan_gemm, reference};
 use crate::rms_norm::{RmsNormBf16Case, RmsNormF32Case, RmsNormFixtures};
 use crate::{
-    BackendError, GpuInfo, KernelBenchmark, RmsNormCaseResult, RmsNormResult, SmokeReport,
-    VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS, VectorAddResult, check_rms_norm_shape,
+    BackendError, GpuInfo, KernelBenchmark, MatmulCaseResult, MatmulResult, RmsNormCaseResult,
+    RmsNormResult, SmokeReport, VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS, VectorAddResult,
+    check_rms_norm_shape,
 };
 
 const VECTOR_MAX_ABS_ERROR: f32 = 1.0e-6;
+// The matmul inputs are small whole numbers, so every product is exact in float32.
+const MATMUL_MAX_ABS_ERROR: f32 = 1.0e-6;
+// A 16 x 16 matrix is exactly one vector-add tile.
+const KERNEL_MATMUL_SIZE: usize = 16;
 const F32_TOLERANCE: f32 = 1.0e-5;
 const BF16_TOLERANCE: f32 = 1.0e-2;
 const BENCHMARK_WARMUP_ITERATIONS: usize = 10;
@@ -40,30 +47,118 @@ impl RmsNormParams {
     }
 }
 
+/// The GPU state shared by every kernel launch and cuBLAS call.
+struct Backend {
+    device: Arc<Device>,
+    stream: Arc<Stream>,
+    cublas: CublasHandle,
+}
+
+impl Backend {
+    fn new() -> Result<Self, BackendError> {
+        let device = Device::new(0).map_err(cuda_error)?;
+        let stream = device.new_stream().map_err(cuda_error)?;
+        let cublas = CublasHandle::new(&stream)?;
+
+        Ok(Self {
+            device,
+            stream,
+            cublas,
+        })
+    }
+
+    /// Computes `output = left @ right` for row-major matrices.
+    fn matmul(
+        &self,
+        output: &mut Tensor<f32>,
+        left: &Tensor<f32>,
+        right: &Tensor<f32>,
+    ) -> Result<(), BackendError> {
+        self.gemm(output, left, right, false)
+    }
+
+    /// Computes `output = left @ right^T` for row-major matrices.
+    fn matmul_transposed(
+        &self,
+        output: &mut Tensor<f32>,
+        left: &Tensor<f32>,
+        right: &Tensor<f32>,
+    ) -> Result<(), BackendError> {
+        self.gemm(output, left, right, true)
+    }
+
+    #[allow(unsafe_code)]
+    fn gemm(
+        &self,
+        output: &mut Tensor<f32>,
+        left: &Tensor<f32>,
+        right: &Tensor<f32>,
+        right_transposed: bool,
+    ) -> Result<(), BackendError> {
+        for (name, contiguous) in [
+            ("left", left.is_contiguous()),
+            ("right", right.is_contiguous()),
+            ("output", output.is_contiguous()),
+        ] {
+            if !contiguous {
+                return Err(BackendError::NonContiguousMatrix(name));
+            }
+        }
+        let call = plan_gemm(
+            left.shape(),
+            right.shape(),
+            output.shape(),
+            right_transposed,
+        )?;
+
+        // SAFETY: plan_gemm checked that the three shapes agree, the tensors are
+        // contiguous float32 buffers on this device, and they stay borrowed until
+        // the stream has been drained below.
+        unsafe {
+            // cuBLAS's first operand is the right matrix. See plan_gemm.
+            self.cublas.gemm_f32(
+                &call,
+                device_address(right),
+                device_address(left),
+                device_address(output),
+            )?;
+        }
+        self.wait_for_stream()
+    }
+
+    /// Blocks until the stream has finished everything queued on it.
+    fn wait_for_stream(&self) -> Result<(), BackendError> {
+        let finished = self.device.new_event().map_err(cuda_error)?;
+        finished.record(&self.stream).map_err(cuda_error)?;
+        finished.synchronize().map_err(cuda_error)
+    }
+}
+
 pub(super) fn run_smoke(fixtures: RmsNormFixtures) -> Result<SmokeReport, BackendError> {
     let visible_device_count = Device::device_count().map_err(cuda_error)?;
     if visible_device_count == 0 {
         return Err(BackendError::Cuda("no CUDA devices are visible".to_owned()));
     }
 
-    let device = Device::new(0).map_err(cuda_error)?;
-    let stream = device.new_stream().map_err(cuda_error)?;
-    let name = device.name().map_err(cuda_error)?;
-    let compute_capability = compute_capability(&device)?;
+    let backend = Backend::new()?;
+    let name = backend.device.name().map_err(cuda_error)?;
+    let compute_capability = compute_capability(&backend.device)?;
 
-    let vector_add = run_vector_add(&stream)?;
-    let rms_norm = run_rms_norm_suite(&stream, fixtures)?;
+    let vector_add = run_vector_add(&backend.stream)?;
+    let rms_norm = run_rms_norm_suite(&backend.stream, fixtures)?;
+    let matmul = run_matmul_suite(&backend)?;
 
     Ok(SmokeReport {
         gpu: GpuInfo {
             name,
-            ordinal: device.ordinal(),
+            ordinal: backend.device.ordinal(),
             compute_capability,
             visible_device_count,
         },
         cutile_version: "0.4.0",
         vector_add,
         rms_norm,
+        matmul,
     })
 }
 
@@ -272,6 +367,167 @@ fn run_rms_norm_bf16(
         benchmark,
         passed: true,
     })
+}
+
+fn run_matmul_suite(backend: &Backend) -> Result<MatmulResult, BackendError> {
+    // Non-square shapes with distinct values, so a swapped or transposed
+    // operand cannot produce the right answer by accident.
+    Ok(MatmulResult {
+        cases: vec![
+            run_matmul_case(backend, "plain_2x3_times_3x4", 2, 3, 4, false)?,
+            run_matmul_case(backend, "transposed_2x3_times_4x3", 2, 3, 4, true)?,
+            run_kernel_matmul_kernel(backend)?,
+        ],
+    })
+}
+
+fn run_matmul_case(
+    backend: &Backend,
+    name: &'static str,
+    rows: usize,
+    inner: usize,
+    cols: usize,
+    right_transposed: bool,
+) -> Result<MatmulCaseResult, BackendError> {
+    let stream = &backend.stream;
+    let right_shape = if right_transposed {
+        [cols, inner]
+    } else {
+        [inner, cols]
+    };
+    let left_host = Arc::new(counting(1, rows * inner));
+    let right_host = Arc::new(counting(7, inner * cols));
+    let expected = reference(&left_host, &right_host, rows, inner, cols, right_transposed);
+
+    let left = upload_matrix(stream, &left_host, [rows, inner])?;
+    let right = upload_matrix(stream, &right_host, right_shape)?;
+    let mut output = api::zeros::<f32>(&[rows, cols])
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+
+    if right_transposed {
+        backend.matmul_transposed(&mut output, &left, &right)?;
+    } else {
+        backend.matmul(&mut output, &left, &right)?;
+    }
+
+    let actual = output.to_host_vec().sync_on(stream).map_err(cutile_error)?;
+    let max_abs_error = verify(name, &actual, &expected, MATMUL_MAX_ABS_ERROR)?;
+
+    Ok(MatmulCaseResult {
+        name,
+        left_shape: [rows, inner],
+        right_shape,
+        right_transposed,
+        max_abs_error,
+        tolerance: MATMUL_MAX_ABS_ERROR,
+        passed: true,
+    })
+}
+
+/// Runs a cuTile kernel, then cuBLAS, then a cuTile kernel again on the same
+/// buffers and stream. A context, stream or pointer mismatch between the two
+/// libraries shows up here as a wrong result or a CUDA error.
+fn run_kernel_matmul_kernel(backend: &Backend) -> Result<MatmulCaseResult, BackendError> {
+    let name = "kernel_matmul_kernel_16x16";
+    let stream = &backend.stream;
+    let size = KERNEL_MATMUL_SIZE;
+    let elements = size * size;
+
+    let first_host = Arc::new(cycling(17, elements));
+    let second_host = Arc::new(cycling(13, elements));
+    let right_host = Arc::new(cycling(7, elements));
+
+    // left = first + second, computed by the vector-add kernel
+    let first = api::copy_host_vec_to_device(&first_host)
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+    let second = api::copy_host_vec_to_device(&second_host)
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+    let mut left = api::zeros::<f32>(&[elements])
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+    let _ = vector_add(
+        (&mut left).partition([VECTOR_TILE_ELEMENTS]),
+        &first,
+        &second,
+    )
+    .sync_on(stream)
+    .map_err(cutile_error)?;
+
+    // product = left @ right, computed by cuBLAS on the kernel's output
+    let left = left.reshape(&[size, size]).map_err(cutile_error)?;
+    let right = upload_matrix(stream, &right_host, [size, size])?;
+    let mut product = api::zeros::<f32>(&[size, size])
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+    backend.matmul(&mut product, &left, &right)?;
+
+    // doubled = product + product, computed by the kernel on cuBLAS's output
+    let product = product.reshape(&[elements]).map_err(cutile_error)?;
+    let mut doubled = api::zeros::<f32>(&[elements])
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+    let _ = vector_add(
+        (&mut doubled).partition([VECTOR_TILE_ELEMENTS]),
+        &product,
+        &product,
+    )
+    .sync_on(stream)
+    .map_err(cutile_error)?;
+    let actual = doubled
+        .to_host_vec()
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+
+    let left_host = first_host
+        .iter()
+        .zip(second_host.iter())
+        .map(|(first, second)| first + second)
+        .collect::<Vec<_>>();
+    let expected = reference(&left_host, &right_host, size, size, size, false)
+        .into_iter()
+        .map(|value| value * 2.0)
+        .collect::<Vec<_>>();
+    let max_abs_error = verify(name, &actual, &expected, MATMUL_MAX_ABS_ERROR)?;
+
+    Ok(MatmulCaseResult {
+        name,
+        left_shape: [size, size],
+        right_shape: [size, size],
+        right_transposed: false,
+        max_abs_error,
+        tolerance: MATMUL_MAX_ABS_ERROR,
+        passed: true,
+    })
+}
+
+fn upload_matrix(
+    stream: &Arc<Stream>,
+    host: &Arc<Vec<f32>>,
+    shape: [usize; 2],
+) -> Result<Tensor<f32>, BackendError> {
+    api::copy_host_vec_to_device(host)
+        .sync_on(stream)
+        .map_err(cutile_error)?
+        .reshape(&shape)
+        .map_err(cutile_error)
+}
+
+/// `start, start + 1, start + 2, ...` as float32.
+fn counting(start: u8, elements: usize) -> Vec<f32> {
+    (start..=u8::MAX).map(f32::from).take(elements).collect()
+}
+
+/// `0, 1, ..., period - 1`, repeated, as float32.
+fn cycling(period: u8, elements: usize) -> Vec<f32> {
+    (0..period).cycle().map(f32::from).take(elements).collect()
+}
+
+fn device_address(tensor: &Tensor<f32>) -> usize {
+    usize::try_from(tensor.device_pointer().cu_deviceptr())
+        .expect("CUDA device addresses fit in usize")
 }
 
 fn launch_rms_norm_f32(

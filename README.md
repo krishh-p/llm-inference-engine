@@ -99,12 +99,20 @@ The GPU smoke test starts with a small cuTile vector add, then runs the first
 real inference kernel: RMSNorm. RMSNorm is checked against PyTorch fixtures at
 hidden sizes 128, 2048 and 2560, with both float32 and bfloat16 coverage.
 
+It also checks matrix multiplication through cuBLAS. Tensors are row-major and
+cuBLAS is column-major, so the test multiplies small non-square matrices, with
+and without a transposed right operand, and compares them with a host
+calculation. One more case runs a cuTile kernel, cuBLAS and a cuTile kernel on
+the same buffers to show the two libraries share one stream.
+
 ```bash
 make rust-smoke
 ```
 
-The pinned CUDA image builds the Rust binary on Modal, so this command works
-from a machine without a local NVIDIA GPU. It writes the GPU, toolchain,
+The GPU code is behind the `cuda` cargo feature, which is off by default, so
+`make rust-check` needs no CUDA toolkit. The pinned CUDA image builds the Rust
+binary on Modal with the feature on, so this command works from a machine
+without a local NVIDIA GPU. It writes the GPU, toolchain,
 100-run warm benchmarks, profiler status and kernel verification results to
 `results/rust-smoke-*.json`.
 

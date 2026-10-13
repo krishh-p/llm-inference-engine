@@ -4,7 +4,7 @@ use engine_core::SafeTensorCatalog;
 
 use crate::{BackendError, check_rms_norm_shape};
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) struct RmsNormF32Case {
     pub name: &'static str,
     pub rows: usize,
@@ -14,7 +14,7 @@ pub(crate) struct RmsNormF32Case {
     pub expected: Vec<f32>,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) struct RmsNormBf16Case {
     pub name: &'static str,
     pub rows: usize,
@@ -24,7 +24,7 @@ pub(crate) struct RmsNormBf16Case {
     pub expected_bits: Vec<u16>,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) struct RmsNormFixtures {
     pub epsilon: f32,
     pub f32_cases: Vec<RmsNormF32Case>,
