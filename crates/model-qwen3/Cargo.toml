@@ -1,0 +1,19 @@
+[package]
+name = "model-qwen3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true
+
+[dev-dependencies]
+safetensors.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

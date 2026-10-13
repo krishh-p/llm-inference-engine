@@ -4,7 +4,9 @@ A from-scratch LLM inference runtime and serving systems engine
 
 ## Prerequisites
 
-[uv](https://docs.astral.sh/uv/), `make`, and a [Modal](https://modal.com/) account with billing enabled for GPU use.
+[uv](https://docs.astral.sh/uv/), [rustup](https://rustup.rs/), `make`, and a
+[Modal](https://modal.com/) account with billing enabled for GPU use. The
+checked-in toolchain file selects the exact Rust version and components.
 
 ## Setup
 
@@ -67,6 +69,29 @@ looser tolerance recorded in the manifest for large positions.
 
 See [tensor shapes and KV cache memory](docs/shapes-and-kv-cache.md) for the
 prefill and decode layouts used by the reference.
+
+## Rust artifact loader
+
+The first Rust slice loads Qwen3 configuration, tokenizer and SafeTensors
+metadata without Python. It also validates the committed fixture manifest and
+checks that the Rust tokenizer produces the recorded token IDs.
+
+Run the local, host-only checks with:
+
+```bash
+make rust-check
+```
+
+Inspect a local Hugging Face snapshot containing `config.json`,
+`tokenizer.json` and one or more `.safetensors` files with:
+
+```bash
+make rust-inspect MODEL_DIR=/path/to/Qwen3-1.7B-Base
+```
+
+The loader memory-maps weight files, so inspection reads tensor metadata without
+copying the entire checkpoint into memory. `Cargo.lock`, the exact Rust toolchain
+and direct dependency versions are committed for reproducible builds.
 
 ## Cost and cache
 See [Modal pricing](https://modal.com/pricing).

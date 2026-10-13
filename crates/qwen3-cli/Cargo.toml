@@ -1,0 +1,14 @@
+[package]
+name = "qwen3-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap.workspace = true
+engine-core = { path = "../engine-core" }
+model-qwen3 = { path = "../model-qwen3" }
+thiserror.workspace = true
+
+[lints]
+workspace = true
