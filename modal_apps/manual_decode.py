@@ -206,9 +206,11 @@ def manual_inference(prompt: str, max_new_tokens: int) -> dict[str, object]:
     volumes={modal_common.HF_CACHE_PATH: hf_cache},
     timeout=600,
 )
-def regression_suite(prompts: list[str], max_new_tokens: int) -> list[dict[str, object]]:
-    if not prompts:
-        raise ValueError("prompts must not be empty")
+def regression_suite(
+    cases: list[dict[str, object]], max_new_tokens: int
+) -> list[dict[str, object]]:
+    if not cases:
+        raise ValueError("cases must not be empty")
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be at least 1")
 
@@ -216,9 +218,17 @@ def regression_suite(prompts: list[str], max_new_tokens: int) -> list[dict[str, 
         raise RuntimeError("CUDA is not available in the Modal container")
 
     model, tokenizer = load_model()
-    return [
-        compare_prompt(model, tokenizer, prompt, max_new_tokens) for prompt in prompts
-    ]
+    results = []
+    for case in cases:
+        prompt = case["prompt"]
+        token_ids = tokenizer(prompt)["input_ids"]
+        if token_ids != case["token_ids"]:
+            raise RuntimeError(
+                f"prompt {prompt!r} tokenized to {token_ids}, "
+                f"expected {case['token_ids']}"
+            )
+        results.append(compare_prompt(model, tokenizer, prompt, max_new_tokens))
+    return results
 
 
 @app.function(
@@ -227,7 +237,9 @@ def regression_suite(prompts: list[str], max_new_tokens: int) -> list[dict[str, 
     volumes={modal_common.HF_CACHE_PATH: hf_cache},
     timeout=600,
 )
-def cache_benchmark(prompt: str, max_new_tokens: int, prompt_repetitions: int) -> dict[str, object]:
+def cache_benchmark(
+    prompt: str, max_new_tokens: int, prompt_repetitions: int
+) -> dict[str, object]:
     if max_new_tokens < 1:
         raise ValueError("max_new_tokens must be at least 1")
     if prompt_repetitions < 1:
@@ -295,7 +307,8 @@ def main(prompt: str = DEFAULT_PROMPT, max_new_tokens: int = MAX_NEW_TOKENS) -> 
 def run_regression() -> None:
     prompt_set = json.loads(PROMPT_SET_PATH.read_text(encoding="utf-8"))
     results = regression_suite.remote(
-        prompt_set["prompts"], prompt_set["max_new_tokens"]
+        prompt_set["cases"],
+        prompt_set["max_new_tokens"],
     )
 
     print(f"regression prompts passed: {len(results)}")

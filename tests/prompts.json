@@ -1,10 +1,25 @@
 {
   "max_new_tokens": 8,
-  "prompts": [
-    "The capital of France is",
-    "2 + 2 =",
-    "Once upon a time",
-    "def fibonacci(n):",
-    "The opposite of hot is"
+  "cases": [
+    {
+      "prompt": "The capital of France is",
+      "token_ids": [785, 6722, 315, 9625, 374]
+    },
+    {
+      "prompt": "2 + 2 =",
+      "token_ids": [17, 488, 220, 17, 284]
+    },
+    {
+      "prompt": "Once upon a time",
+      "token_ids": [12522, 5193, 264, 882]
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "token_ids": [750, 75698, 1445, 1648]
+    },
+    {
+      "prompt": "The opposite of hot is",
+      "token_ids": [785, 14002, 315, 4017, 374]
+    }
   ]
 }
