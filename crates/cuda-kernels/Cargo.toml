@@ -1,0 +1,11 @@
+[package]
+name = "cuda-kernels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cutile.workspace = true
+
+[lints]
+workspace = true

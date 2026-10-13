@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/cuda-backend",
+    "crates/cuda-kernels",
     "crates/engine-core",
     "crates/model-qwen3",
     "crates/qwen3-cli",
@@ -13,6 +15,8 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 clap = { version = "=4.6.7", features = ["derive"] }
+cuda-core = "=0.4.0"
+cutile = "=0.4.0"
 memmap2 = "=0.9.11"
 safetensors = "=0.8.0"
 serde = { version = "=1.0.229", features = ["derive"] }

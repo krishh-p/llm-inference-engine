@@ -93,6 +93,20 @@ The loader memory-maps weight files, so inspection reads tensor metadata without
 copying the entire checkpoint into memory. `Cargo.lock`, the exact Rust toolchain
 and direct dependency versions are committed for reproducible builds.
 
+## Rust CUDA smoke test
+
+The first GPU slice is a small cuTile vector add. It copies inputs to an L4,
+runs the same Rust kernel twice, checks the result and keeps first-run JIT time
+separate from the warm launch.
+
+```bash
+make rust-smoke
+```
+
+The pinned CUDA image builds the Rust binary on Modal, so this command works
+from a machine without a local NVIDIA GPU. It writes the GPU, toolchain,
+timings and verification result to `results/rust-smoke-*.json`.
+
 ## Cost and cache
 See [Modal pricing](https://modal.com/pricing).
 

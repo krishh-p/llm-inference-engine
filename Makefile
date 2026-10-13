@@ -1,4 +1,4 @@
-.PHONY: dev manual fixtures regression cache-benchmark rust-check rust-inspect
+.PHONY: dev manual fixtures regression cache-benchmark rust-check rust-inspect rust-smoke
 
 PROMPT ?= The capital of France is
 MAX_NEW_TOKENS ?= 20
@@ -26,3 +26,6 @@ rust-check:
 rust-inspect:
 	@test -n "$(MODEL_DIR)" || (echo "set MODEL_DIR to a local Qwen3 snapshot" && exit 1)
 	cargo run --locked -p qwen3-cli -- inspect --model-dir "$(MODEL_DIR)"
+
+rust-smoke:
+	uv run modal run modal_apps/rust_smoke.py
