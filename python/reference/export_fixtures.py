@@ -15,6 +15,8 @@ ROPE_ROTATION_ATOL = 1e-5
 ROPE_TABLE_ATOL = 1e-2
 RMS_NORM_FLOAT32_ATOL = 1e-5
 RMS_NORM_BFLOAT16_ATOL = 1e-2
+PROJECTION_ATOL = 1e-5
+PROJECTION_RTOL = 1e-5
 
 SOURCE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = modal_common.find_project_root(__file__)
@@ -265,6 +267,11 @@ def build_fixtures() -> dict[str, object]:
         "float32_atol": RMS_NORM_FLOAT32_ATOL,
         "bfloat16_atol": RMS_NORM_BFLOAT16_ATOL,
     }
+    for filename in ("block_0.safetensors", "decode_block_0.safetensors"):
+        file_info[filename]["tolerances"] = {
+            "projection_atol": PROJECTION_ATOL,
+            "projection_rtol": PROJECTION_RTOL,
+        }
 
     manifest = {
         "format_version": 1,

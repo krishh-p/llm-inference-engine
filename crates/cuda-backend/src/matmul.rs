@@ -71,6 +71,27 @@ pub(crate) fn plan_gemm(
     })
 }
 
+/// Checks that a matrix lives on the device the backend runs on.
+///
+/// # Errors
+///
+/// Returns an error naming the matrix when the two devices differ.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) fn check_device(
+    name: &'static str,
+    matrix_device: usize,
+    backend_device: usize,
+) -> Result<(), BackendError> {
+    if matrix_device != backend_device {
+        return Err(BackendError::WrongDevice {
+            name,
+            expected: backend_device,
+            actual: matrix_device,
+        });
+    }
+    Ok(())
+}
+
 /// Multiplies row-major matrices on the host: `left @ right`, or `left @ right^T`.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn reference(
@@ -174,6 +195,21 @@ mod tests {
             plan_gemm(&[2, 0], &[0, 4], &[2, 4], false),
             Err(BackendError::MatmulShape { .. })
         ));
+    }
+
+    #[test]
+    fn accepts_a_matrix_on_the_backend_device() {
+        assert!(check_device("left", 0, 0).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_matrix_on_another_device() {
+        let error = check_device("right", 1, 0).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "matmul right matrix is on CUDA device 1, but the backend uses device 0"
+        );
     }
 
     #[test]

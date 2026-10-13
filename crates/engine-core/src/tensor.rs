@@ -186,6 +186,27 @@ impl OwnedTensor {
             .collect())
     }
 
+    /// Decodes a float32 or bfloat16 tensor as float32 values.
+    ///
+    /// Every bfloat16 value is also a float32 value, so widening is exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor has another dtype or its byte length
+    /// does not match its shape.
+    pub fn widen_to_f32_vec(&self) -> crate::Result<Vec<f32>> {
+        if self.descriptor.layout.dtype != DType::BFloat16 {
+            return self.to_f32_vec();
+        }
+
+        // bfloat16 is the top half of the float32 with the same value
+        Ok(self
+            .to_bf16_bits()?
+            .into_iter()
+            .map(|bits| f32::from_bits(u32::from(bits) << 16))
+            .collect())
+    }
+
     /// Decodes the raw bits of a bfloat16 tensor.
     ///
     /// # Errors
@@ -252,6 +273,7 @@ mod tests {
         };
 
         assert_eq!(tensor.to_f32_vec().unwrap(), vec![1.5, -2.25]);
+        assert_eq!(tensor.widen_to_f32_vec().unwrap(), vec![1.5, -2.25]);
     }
 
     #[test]
@@ -268,5 +290,6 @@ mod tests {
         };
 
         assert_eq!(tensor.to_bf16_bits().unwrap(), vec![0x3f80, 0xc010]);
+        assert_eq!(tensor.widen_to_f32_vec().unwrap(), vec![1.0, -2.25]);
     }
 }

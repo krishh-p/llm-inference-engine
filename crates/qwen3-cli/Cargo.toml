@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+cuda = ["model-qwen3/cuda"]
+
 [dependencies]
 clap.workspace = true
 engine-core = { path = "../engine-core" }

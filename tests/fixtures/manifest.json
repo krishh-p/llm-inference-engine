@@ -274,6 +274,10 @@
           "dtype": "float32"
         }
       },
+      "tolerances": {
+        "projection_atol": 1e-05,
+        "projection_rtol": 1e-05
+      },
       "bytes": 389936,
       "sha256": "ffa21b569be323b3f7bf55618d57210c329e6d01dc03ac5f01617391152e66b4"
     },
@@ -405,6 +409,10 @@
           ],
           "dtype": "float32"
         }
+      },
+      "tolerances": {
+        "projection_atol": 1e-05,
+        "projection_rtol": 1e-05
       },
       "bytes": 169200,
       "sha256": "e5397576078a4e6ea34f9619d6a05ad78ad69509998d9d02a9b9784482c9193d"

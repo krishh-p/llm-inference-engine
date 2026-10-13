@@ -7,6 +7,9 @@ pub enum ModelError {
     #[error(transparent)]
     Engine(#[from] engine_core::EngineError),
 
+    #[error(transparent)]
+    Backend(#[from] cuda_backend::BackendError),
+
     #[error("invalid Qwen3 config: {0}")]
     InvalidConfig(String),
 
@@ -45,6 +48,16 @@ pub enum ModelError {
 
     #[error("fixture revision {actual} does not match pinned model revision {expected}")]
     RevisionMismatch { expected: String, actual: String },
+
+    #[error(
+        "{name} differs from its fixture by up to {max_abs_error}, allowed {atol} + {rtol} * |expected|"
+    )]
+    FixtureMismatch {
+        name: String,
+        max_abs_error: f32,
+        atol: f64,
+        rtol: f64,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, ModelError>;

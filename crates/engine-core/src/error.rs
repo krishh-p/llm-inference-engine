@@ -70,6 +70,9 @@ pub enum EngineError {
         actual: String,
     },
 
+    #[error("fixture {file} has no {name} tolerance in the manifest")]
+    FixtureTolerance { file: String, name: String },
+
     #[error("fixture {file} tensor {tensor:?}: {message}")]
     FixtureTensor {
         file: PathBuf,

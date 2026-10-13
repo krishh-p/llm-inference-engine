@@ -3,13 +3,13 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use engine_core::FixtureManifest;
-use model_qwen3::{ModelError, Qwen3Artifacts, RegressionPromptSet};
+use model_qwen3::{ModelError, Qwen3Artifacts, RegressionPromptSet, verify_projections};
 use thiserror::Error;
 
 const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-1.7B-Base";
 
 #[derive(Debug, Parser)]
-#[command(name = "qwen3-cli", about = "Inspect Qwen3 model artifacts")]
+#[command(name = "qwen3-cli", about = "Inspect and verify Qwen3 model artifacts")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -38,6 +38,17 @@ enum Command {
         /// Hugging Face model ID expected by the fixture manifest.
         #[arg(long, default_value = DEFAULT_MODEL_ID)]
         model_id: String,
+    },
+
+    /// Run layer 0's Q, K and V projections on the GPU and compare them with the golden fixtures.
+    Verify {
+        /// Directory containing config.json, tokenizer.json and `SafeTensors` weights.
+        #[arg(long)]
+        model_dir: PathBuf,
+
+        /// Directory containing manifest.json and the golden `SafeTensors` files.
+        #[arg(long, default_value = "tests/fixtures")]
+        fixtures: PathBuf,
     },
 }
 
@@ -87,6 +98,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
             revision_file,
             model_id,
         } => inspect(&model_dir, &fixtures, &prompts, &revision_file, &model_id),
+        Command::Verify {
+            model_dir,
+            fixtures,
+        } => verify(&model_dir, &fixtures),
     }
 }
 
@@ -148,6 +163,24 @@ fn inspect(
     println!("fixture_tensors: {}", fixture_validation.tensor_count);
     println!("fixture_bytes: {}", fixture_validation.total_bytes);
     println!("artifact validation passed");
+    Ok(())
+}
+
+fn verify(model_dir: &Path, fixture_dir: &Path) -> Result<(), CliError> {
+    let artifacts = Qwen3Artifacts::open(model_dir)?;
+    let results = verify_projections(&artifacts, fixture_dir)?;
+
+    for result in &results {
+        println!(
+            "{}: shape={:?}, max_abs_error={}, atol={}, rtol={}",
+            result.name,
+            result.shape,
+            result.max_abs_error,
+            result.tolerance.atol,
+            result.tolerance.rtol
+        );
+    }
+    println!("projection checks passed: {}", results.len());
     Ok(())
 }
 

@@ -4,6 +4,8 @@ mod safetensors;
 mod tensor;
 
 pub use error::{EngineError, Result, read_json};
-pub use fixtures::{FixtureFile, FixtureManifest, FixtureModel, FixtureTensor, FixtureValidation};
+pub use fixtures::{
+    FixtureFile, FixtureManifest, FixtureModel, FixtureTensor, FixtureValidation, Tolerance,
+};
 pub use safetensors::SafeTensorCatalog;
 pub use tensor::{BufferOwner, DType, Device, OwnedTensor, TensorDescriptor, TensorLayout};

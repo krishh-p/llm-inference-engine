@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+cuda = ["cuda-backend/cuda"]
+
 [dependencies]
+cuda-backend = { path = "../cuda-backend" }
 engine-core = { path = "../engine-core" }
 serde.workspace = true
 serde_json.workspace = true

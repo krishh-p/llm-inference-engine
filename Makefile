@@ -1,4 +1,4 @@
-.PHONY: dev manual fixtures regression cache-benchmark rust-check rust-inspect rust-smoke
+.PHONY: dev manual fixtures regression cache-benchmark rust-check rust-inspect rust-smoke rust-verify
 
 PROMPT ?= The capital of France is
 MAX_NEW_TOKENS ?= 20
@@ -28,4 +28,7 @@ rust-inspect:
 	cargo run --locked -p qwen3-cli -- inspect --model-dir "$(MODEL_DIR)"
 
 rust-smoke:
-	uv run modal run modal_apps/rust_smoke.py
+	uv run modal run modal_apps/rust_smoke.py::main
+
+rust-verify:
+	uv run modal run modal_apps/rust_smoke.py::run_verify

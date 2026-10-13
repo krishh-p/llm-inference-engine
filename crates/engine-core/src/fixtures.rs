@@ -42,6 +42,26 @@ pub struct FixtureTensor {
     pub dtype: String,
 }
 
+/// How far a value may be from its fixture: `atol + rtol * |expected|`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tolerance {
+    pub atol: f64,
+    pub rtol: f64,
+}
+
+impl Tolerance {
+    #[must_use]
+    pub fn allows(self, actual: f32, expected: f32) -> bool {
+        // an infinite expected value would make the allowed error infinite too
+        if !actual.is_finite() || !expected.is_finite() {
+            return false;
+        }
+
+        let error = (f64::from(actual) - f64::from(expected)).abs();
+        error <= self.atol + self.rtol * f64::from(expected).abs()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixtureValidation {
     pub file_count: usize,
@@ -62,6 +82,28 @@ impl FixtureManifest {
             return Err(EngineError::FixtureVersion(manifest.format_version));
         }
         Ok(manifest)
+    }
+
+    /// Looks up the `{name}_atol` and `{name}_rtol` pair recorded for a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file or either value is not in the manifest.
+    pub fn tolerance(&self, file: &str, name: &str) -> Result<Tolerance> {
+        let tolerances = self.files.get(file).map(|file| &file.tolerances);
+        let value = |suffix: &str| {
+            tolerances
+                .and_then(|tolerances| tolerances.get(&format!("{name}_{suffix}")))
+                .copied()
+        };
+
+        match (value("atol"), value("rtol")) {
+            (Some(atol), Some(rtol)) => Ok(Tolerance { atol, rtol }),
+            _ => Err(EngineError::FixtureTolerance {
+                file: file.to_owned(),
+                name: name.to_owned(),
+            }),
+        }
     }
 
     /// Checks every fixture's size, checksum, and tensor metadata.
@@ -162,4 +204,37 @@ fn lower_hex(bytes: &[u8]) -> String {
         output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tolerance;
+
+    #[test]
+    fn tolerance_grows_with_the_expected_value() {
+        let tolerance = Tolerance {
+            atol: 0.5,
+            rtol: 0.25,
+        };
+
+        // allowed error is 0.5 + 0.25 * 8 = 2.5
+        assert!(tolerance.allows(10.5, 8.0));
+        assert!(tolerance.allows(5.5, 8.0));
+        assert!(!tolerance.allows(10.75, 8.0));
+        assert!(tolerance.allows(-10.5, -8.0));
+    }
+
+    #[test]
+    fn tolerance_rejects_values_that_are_not_finite() {
+        let tolerance = Tolerance {
+            atol: 1.0,
+            rtol: 1.0,
+        };
+
+        assert!(!tolerance.allows(f32::NAN, 1.0));
+        assert!(!tolerance.allows(f32::INFINITY, 1.0));
+        assert!(!tolerance.allows(1.0, f32::INFINITY));
+        assert!(!tolerance.allows(1.0, f32::NAN));
+        assert!(!tolerance.allows(f32::INFINITY, f32::INFINITY));
+    }
 }

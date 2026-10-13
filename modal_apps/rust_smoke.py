@@ -9,6 +9,8 @@ from pathlib import Path
 
 import modal
 
+import modal_common
+
 APP_NAME = "llm-inference-engine-rust-smoke"
 CUDA_IMAGE = "nvidia/cuda:13.3.0-devel-ubuntu24.04"
 REMOTE_ROOT = "/workspace"
@@ -28,6 +30,8 @@ RUST_VERSION = tomllib.loads(TOOLCHAIN_PATH.read_text(encoding="utf-8"))["toolch
 
 app = modal.App(APP_NAME)
 
+hf_cache = modal_common.hugging_face_cache()
+
 image = (
     modal.Image.from_registry(CUDA_IMAGE, add_python="3.12")
     .entrypoint([])
@@ -38,10 +42,12 @@ image = (
         "libclang-dev",
         "pkg-config",
     )
+    .uv_pip_install("huggingface-hub==0.36.2")
     .env(
         {
             "CUDA_TOOLKIT_PATH": "/usr/local/cuda",
             "CUTILE_TILEIRAS_PATH": "/usr/local/cuda/bin/tileiras",
+            "HF_HOME": modal_common.HF_CACHE_PATH,
             "PATH": "/root/.cargo/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
     )
@@ -57,17 +63,20 @@ image = (
         copy=True,
     )
     .add_local_file(
-        PROJECT_ROOT / "tests/fixtures/rms_norm.safetensors",
-        f"{REMOTE_ROOT}/tests/fixtures/rms_norm.safetensors",
+        PROJECT_ROOT / "model_revision.txt",
+        f"{REMOTE_ROOT}/model_revision.txt",
         copy=True,
     )
+    .add_local_file(
+        PROJECT_ROOT / "modal_common.py", "/root/modal_common.py", copy=True
+    )
+    .add_local_dir(PROJECT_ROOT / "tests", f"{REMOTE_ROOT}/tests", copy=True)
     .add_local_dir(PROJECT_ROOT / "crates", f"{REMOTE_ROOT}/crates", copy=True)
     .run_commands(
-        f"cd {REMOTE_ROOT} && cargo clippy --locked --release "
-        "-p cuda-backend -p cuda-kernels --features cuda-backend/cuda "
-        "--all-targets -- -D warnings && "
-        f"cd {REMOTE_ROOT} && cargo build --locked --release "
-        "-p cuda-backend --features cuda-backend/cuda --bin cuda-smoke"
+        f"cd {REMOTE_ROOT} && cargo clippy --locked --release --workspace "
+        "--features qwen3-cli/cuda --all-targets -- -D warnings && "
+        f"cd {REMOTE_ROOT} && cargo build --locked --release --workspace "
+        "--features qwen3-cli/cuda"
     )
 )
 
@@ -83,6 +92,9 @@ pytorch_image = (
         PROJECT_ROOT / "tests/fixtures/rms_norm.safetensors",
         REMOTE_FIXTURE,
         copy=True,
+    )
+    .add_local_file(
+        PROJECT_ROOT / "modal_common.py", "/root/modal_common.py", copy=True
     )
 )
 
@@ -234,6 +246,46 @@ def run_on_gpu() -> dict[str, object]:
     return result
 
 
+@app.function(
+    image=image,
+    gpu="L4",
+    volumes={modal_common.HF_CACHE_PATH: hf_cache},
+    timeout=1200,
+)
+def verify_on_gpu() -> str:
+    from huggingface_hub import snapshot_download
+
+    revision_path = Path(REMOTE_ROOT) / "model_revision.txt"
+    revision = revision_path.read_text(encoding="utf-8").strip()
+
+    # reuses the snapshot in the volume, and downloads it if it is not there yet
+    model_dir = snapshot_download(
+        modal_common.MODEL_NAME,
+        revision=revision,
+        allow_patterns=["config.json", "tokenizer.json", "*.safetensors"],
+    )
+
+    binary = f"{REMOTE_ROOT}/target/release/qwen3-cli"
+    outputs = []
+    for command in ("inspect", "verify"):
+        completed = subprocess.run(
+            [binary, command, "--model-dir", model_dir],
+            check=False,
+            capture_output=True,
+            cwd=REMOTE_ROOT,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"qwen3-cli {command} failed\n"
+                f"stdout:\n{completed.stdout}\n"
+                f"stderr:\n{completed.stderr}"
+            )
+        outputs.append(completed.stdout.strip())
+
+    return "\n".join(outputs)
+
+
 @app.function(image=pytorch_image, gpu="L4", timeout=600)
 def benchmark_pytorch() -> dict[str, object]:
     import torch
@@ -367,3 +419,8 @@ def main() -> None:
     else:
         print("pytorch_compiled: unavailable")
     print(f"result_json: {output_path}")
+
+
+@app.local_entrypoint()
+def run_verify() -> None:
+    print(verify_on_gpu.remote())

@@ -7,9 +7,16 @@ mod matmul;
 mod rms_norm;
 
 #[cfg(feature = "cuda")]
+mod backend;
+#[cfg(feature = "cuda")]
 mod cublas;
 #[cfg(feature = "cuda")]
 mod gpu;
+
+#[cfg(feature = "cuda")]
+pub use backend::Backend;
+#[cfg(feature = "cuda")]
+pub use cutile::tensor::Tensor;
 
 const VECTOR_ELEMENTS: usize = 4096;
 const VECTOR_TILE_ELEMENTS: usize = 256;
@@ -125,6 +132,15 @@ pub enum BackendError {
 
     #[error("matmul needs a contiguous row-major {0} matrix")]
     NonContiguousMatrix(&'static str),
+
+    #[error(
+        "matmul {name} matrix is on CUDA device {actual}, but the backend uses device {expected}"
+    )]
+    WrongDevice {
+        name: &'static str,
+        expected: usize,
+        actual: usize,
+    },
 
     #[error("this build has no CUDA support; rebuild with the cuda feature")]
     CudaDisabled,
