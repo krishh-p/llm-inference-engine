@@ -410,6 +410,13 @@ def main() -> None:
             f"median_ms={benchmark['median_ms']:.4f}, "
             f"bandwidth_gbps={benchmark['effective_bandwidth_gbps']:.2f}"
         )
+    tables = result["rope"]["tables"]
+    print(
+        f"rope_tables: cos_max_abs_error={tables['cos_max_abs_error']}, "
+        f"sin_max_abs_error={tables['sin_max_abs_error']}"
+    )
+    for case in result["rope"]["cases"]:
+        print(f"{case['name']}: max_abs_error={case['max_abs_error']}")
     for case in result["matmul"]["cases"]:
         print(f"matmul_{case['name']}: max_abs_error={case['max_abs_error']}")
     pytorch = result["pytorch_benchmark"]

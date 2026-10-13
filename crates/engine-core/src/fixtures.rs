@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{EngineError, Result, SafeTensorCatalog, read_json};
@@ -43,7 +43,7 @@ pub struct FixtureTensor {
 }
 
 /// How far a value may be from its fixture: `atol + rtol * |expected|`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Tolerance {
     pub atol: f64,
     pub rtol: f64,
@@ -59,6 +59,37 @@ impl Tolerance {
 
         let error = (f64::from(actual) - f64::from(expected)).abs();
         error <= self.atol + self.rtol * f64::from(expected).abs()
+    }
+
+    /// Returns the largest absolute error between `actual` and `expected`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `name` when the lengths differ or any value is
+    /// outside the tolerance.
+    pub fn compare(self, name: &str, actual: &[f32], expected: &[f32]) -> Result<f32> {
+        let mut max_abs_error = 0.0_f32;
+        let mut within_tolerance = actual.len() == expected.len();
+
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            let error = (actual - expected).abs();
+            if !error.is_finite() {
+                max_abs_error = f32::INFINITY;
+                break;
+            }
+            max_abs_error = max_abs_error.max(error);
+            within_tolerance &= self.allows(actual, expected);
+        }
+
+        if !within_tolerance || !max_abs_error.is_finite() {
+            return Err(EngineError::FixtureMismatch {
+                name: name.to_owned(),
+                max_abs_error,
+                atol: self.atol,
+                rtol: self.rtol,
+            });
+        }
+        Ok(max_abs_error)
     }
 }
 
@@ -209,6 +240,43 @@ fn lower_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::Tolerance;
+    use crate::EngineError;
+
+    const HALF: Tolerance = Tolerance {
+        atol: 0.5,
+        rtol: 0.0,
+    };
+
+    #[test]
+    fn compare_returns_the_largest_error() {
+        let max_abs_error = HALF.compare("case", &[1.0, 2.25, 3.0], &[1.0, 2.0, 3.5]);
+
+        assert_eq!(max_abs_error.unwrap(), 0.5);
+    }
+
+    #[test]
+    fn compare_rejects_a_value_outside_the_tolerance() {
+        let error = HALF
+            .compare("prefill_q", &[1.0, 3.0], &[1.0, 2.0])
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "prefill_q differs from its fixture by up to 1, allowed 0.5 + 0 * |expected|"
+        );
+    }
+
+    #[test]
+    fn compare_rejects_nan_and_missing_values() {
+        assert!(matches!(
+            HALF.compare("case", &[f32::NAN], &[1.0]),
+            Err(EngineError::FixtureMismatch { .. })
+        ));
+        assert!(matches!(
+            HALF.compare("case", &[1.0], &[1.0, 2.0]),
+            Err(EngineError::FixtureMismatch { .. })
+        ));
+    }
 
     #[test]
     fn tolerance_grows_with_the_expected_value() {

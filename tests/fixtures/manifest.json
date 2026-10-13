@@ -184,7 +184,9 @@
       },
       "tolerances": {
         "rotation_atol": 1e-05,
-        "table_atol": 0.01
+        "rotation_rtol": 0.0,
+        "table_atol": 0.001,
+        "table_rtol": 0.0
       },
       "bytes": 126052,
       "sha256": "342fc0636dc64256c144bcf638d56385d7c73080e0259e17f5794945150720c9"

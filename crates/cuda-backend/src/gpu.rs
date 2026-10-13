@@ -2,17 +2,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cuda_core::{Device, Stream, get_device_sm_name};
-use cuda_kernels::{rms_norm_bf16, rms_norm_f32, vector_add};
+use cuda_kernels::{rms_norm_bf16, rms_norm_f32, rope_f32, vector_add};
 use cutile::half::bf16;
 use cutile::prelude::*;
 
 use crate::backend::Backend;
 use crate::matmul::reference;
 use crate::rms_norm::{RmsNormBf16Case, RmsNormF32Case, RmsNormFixtures};
+use crate::rope::{RopeCase, RopeFixtures, check_tables};
 use crate::{
     BackendError, GpuInfo, KernelBenchmark, MatmulCaseResult, MatmulResult, RmsNormCaseResult,
-    RmsNormResult, SmokeReport, VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS, VectorAddResult,
-    check_rms_norm_shape,
+    RmsNormResult, RopeCaseResult, RopeResult, SmokeReport, VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS,
+    VectorAddResult, check_rms_norm_shape,
 };
 
 const VECTOR_MAX_ABS_ERROR: f32 = 1.0e-6;
@@ -47,7 +48,10 @@ impl RmsNormParams {
     }
 }
 
-pub(super) fn run_smoke(fixtures: RmsNormFixtures) -> Result<SmokeReport, BackendError> {
+pub(super) fn run_smoke(
+    rms_norm_fixtures: RmsNormFixtures,
+    rope_fixtures: &RopeFixtures,
+) -> Result<SmokeReport, BackendError> {
     let visible_device_count = Device::device_count().map_err(cuda_error)?;
     if visible_device_count == 0 {
         return Err(BackendError::Cuda("no CUDA devices are visible".to_owned()));
@@ -58,7 +62,8 @@ pub(super) fn run_smoke(fixtures: RmsNormFixtures) -> Result<SmokeReport, Backen
     let compute_capability = compute_capability(&backend.device)?;
 
     let vector_add = run_vector_add(&backend.stream)?;
-    let rms_norm = run_rms_norm_suite(&backend.stream, fixtures)?;
+    let rms_norm = run_rms_norm_suite(&backend.stream, rms_norm_fixtures)?;
+    let rope = run_rope_suite(&backend.stream, rope_fixtures)?;
     let matmul = run_matmul_suite(&backend)?;
 
     Ok(SmokeReport {
@@ -71,6 +76,7 @@ pub(super) fn run_smoke(fixtures: RmsNormFixtures) -> Result<SmokeReport, Backen
         cutile_version: "0.4.0",
         vector_add,
         rms_norm,
+        rope,
         matmul,
     })
 }
@@ -280,6 +286,81 @@ fn run_rms_norm_bf16(
         benchmark,
         passed: true,
     })
+}
+
+fn run_rope_suite(
+    stream: &Arc<Stream>,
+    fixtures: &RopeFixtures,
+) -> Result<RopeResult, BackendError> {
+    let tables = check_tables(fixtures)?;
+
+    // The kernel is checked with the reference tables, so its tolerance does
+    // not have to absorb the difference between the two sets of tables.
+    let rows = fixtures.positions.len();
+    let half = fixtures.head_dim / 2;
+    let cos = upload_rope_table(stream, &fixtures.cos, rows, half)?;
+    let sin = upload_rope_table(stream, &fixtures.sin, rows, half)?;
+
+    let mut cases = Vec::with_capacity(fixtures.cases.len());
+    for case in &fixtures.cases {
+        cases.push(run_rope_case(stream, fixtures, case, &cos, &sin)?);
+    }
+
+    Ok(RopeResult { tables, cases })
+}
+
+fn run_rope_case(
+    stream: &Arc<Stream>,
+    fixtures: &RopeFixtures,
+    case: &RopeCase,
+    cos: &Tensor<f32>,
+    sin: &Tensor<f32>,
+) -> Result<RopeCaseResult, BackendError> {
+    let rows = fixtures.positions.len();
+    let half = fixtures.head_dim / 2;
+
+    // [heads, rows, head_dim] is viewed as [heads, rows * 2, half], which is
+    // the same memory with the two halves of every vector on separate rows.
+    let shape = [case.heads, rows * 2, half];
+    let input = api::copy_host_vec_to_device(&Arc::new(case.input.clone()))
+        .sync_on(stream)
+        .map_err(cutile_error)?
+        .reshape(&shape)
+        .map_err(cutile_error)?;
+    let mut output = api::zeros::<f32>(&shape)
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+
+    let _ = rope_f32((&mut output).partition([1, 2, half]), &input, cos, sin)
+        .sync_on(stream)
+        .map_err(cutile_error)?;
+
+    let actual = output.to_host_vec().sync_on(stream).map_err(cutile_error)?;
+    let tolerance = fixtures.rotation_tolerance;
+    let max_abs_error = tolerance.compare(case.name, &actual, &case.expected)?;
+
+    Ok(RopeCaseResult {
+        name: case.name,
+        heads: case.heads,
+        rows,
+        head_dim: fixtures.head_dim,
+        max_abs_error,
+        tolerance,
+        passed: true,
+    })
+}
+
+fn upload_rope_table(
+    stream: &Arc<Stream>,
+    table: &[f32],
+    rows: usize,
+    half: usize,
+) -> Result<Tensor<f32>, BackendError> {
+    api::copy_host_vec_to_device(&Arc::new(table.to_vec()))
+        .sync_on(stream)
+        .map_err(cutile_error)?
+        .reshape(&[rows, half])
+        .map_err(cutile_error)
 }
 
 fn run_matmul_suite(backend: &Backend) -> Result<MatmulResult, BackendError> {

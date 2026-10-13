@@ -12,7 +12,9 @@ APP_NAME = "llm-inference-engine-fixtures"
 PROMPT = "The capital of France is"
 MAX_NEW_TOKENS = 4
 ROPE_ROTATION_ATOL = 1e-5
-ROPE_TABLE_ATOL = 1e-2
+ROPE_ROTATION_RTOL = 0.0
+ROPE_TABLE_ATOL = 1e-3
+ROPE_TABLE_RTOL = 0.0
 RMS_NORM_FLOAT32_ATOL = 1e-5
 RMS_NORM_BFLOAT16_ATOL = 1e-2
 PROJECTION_ATOL = 1e-5
@@ -261,7 +263,9 @@ def build_fixtures() -> dict[str, object]:
         file_info[filename] = {"tensors": tensor_shapes}
     file_info["rope.safetensors"]["tolerances"] = {
         "rotation_atol": ROPE_ROTATION_ATOL,
+        "rotation_rtol": ROPE_ROTATION_RTOL,
         "table_atol": ROPE_TABLE_ATOL,
+        "table_rtol": ROPE_TABLE_RTOL,
     }
     file_info["rms_norm.safetensors"]["tolerances"] = {
         "float32_atol": RMS_NORM_FLOAT32_ATOL,

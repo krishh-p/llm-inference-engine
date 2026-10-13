@@ -186,6 +186,37 @@ impl OwnedTensor {
             .collect())
     }
 
+    /// Decodes an int64 tensor from its little-endian `SafeTensors` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor is not int64 or its byte length does
+    /// not match its shape.
+    pub fn to_i64_vec(&self) -> crate::Result<Vec<i64>> {
+        if self.descriptor.layout.dtype != DType::Int64 {
+            return Err(crate::EngineError::TensorDtype {
+                name: self.descriptor.name.clone(),
+                expected: "int64",
+                actual: self.descriptor.layout.dtype.to_string(),
+            });
+        }
+
+        let expected = self.descriptor.layout.element_count() * size_of::<i64>();
+        if self.bytes.len() != expected {
+            return Err(crate::EngineError::TensorDataLength {
+                name: self.descriptor.name.clone(),
+                expected,
+                actual: self.bytes.len(),
+            });
+        }
+
+        let (values, _) = self.bytes.as_chunks::<{ size_of::<i64>() }>();
+        Ok(values
+            .iter()
+            .map(|bytes| i64::from_le_bytes(*bytes))
+            .collect())
+    }
+
     /// Decodes a float32 or bfloat16 tensor as float32 values.
     ///
     /// Every bfloat16 value is also a float32 value, so widening is exact.
@@ -274,6 +305,22 @@ mod tests {
 
         assert_eq!(tensor.to_f32_vec().unwrap(), vec![1.5, -2.25]);
         assert_eq!(tensor.widen_to_f32_vec().unwrap(), vec![1.5, -2.25]);
+    }
+
+    #[test]
+    fn decodes_int64_tensor_bytes() {
+        let tensor = OwnedTensor {
+            descriptor: TensorDescriptor {
+                name: "positions".to_owned(),
+                layout: TensorLayout::contiguous(DType::Int64, vec![2]),
+                device: Device::Cpu,
+                owner: BufferOwner::ModelFile(PathBuf::from("fixture.safetensors")),
+                byte_len: 16,
+            },
+            bytes: [4096_i64.to_le_bytes(), (-1_i64).to_le_bytes()].concat(),
+        };
+
+        assert_eq!(tensor.to_i64_vec().unwrap(), vec![4096, -1]);
     }
 
     #[test]

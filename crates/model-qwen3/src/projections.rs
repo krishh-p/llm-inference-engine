@@ -137,42 +137,6 @@ pub(crate) fn split_heads(values: &[f32], rows: usize, heads: usize, head_dim: u
     output
 }
 
-/// Returns the largest absolute error between `actual` and `expected`.
-///
-/// # Errors
-///
-/// Returns an error when any value is outside the tolerance.
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-pub(crate) fn compare(
-    name: &str,
-    actual: &[f32],
-    expected: &[f32],
-    tolerance: Tolerance,
-) -> Result<f32> {
-    let mut max_abs_error = 0.0_f32;
-    let mut within_tolerance = actual.len() == expected.len();
-
-    for (&actual, &expected) in actual.iter().zip(expected) {
-        let error = (actual - expected).abs();
-        if !error.is_finite() {
-            max_abs_error = f32::INFINITY;
-            break;
-        }
-        max_abs_error = max_abs_error.max(error);
-        within_tolerance &= tolerance.allows(actual, expected);
-    }
-
-    if !within_tolerance || !max_abs_error.is_finite() {
-        return Err(ModelError::FixtureMismatch {
-            name: name.to_owned(),
-            max_abs_error,
-            atol: tolerance.atol,
-            rtol: tolerance.rtol,
-        });
-    }
-    Ok(max_abs_error)
-}
-
 #[cfg(feature = "cuda")]
 fn run_on_gpu(config: &Qwen3Config, projections: &[Projection]) -> Result<Vec<ProjectionResult>> {
     crate::gpu::run_projections(config, projections)
@@ -186,11 +150,6 @@ fn run_on_gpu(_config: &Qwen3Config, _projections: &[Projection]) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const TOLERANCE: Tolerance = Tolerance {
-        atol: 0.5,
-        rtol: 0.0,
-    };
 
     #[test]
     fn split_heads_groups_rows_by_head() {
@@ -207,30 +166,5 @@ mod tests {
                 121.0, 122.0, 221.0, 222.0, // head 2: row 1, row 2
             ]
         );
-    }
-
-    #[test]
-    fn compare_returns_the_largest_error() {
-        let max_abs_error = compare("case", &[1.0, 2.25, 3.0], &[1.0, 2.0, 3.5], TOLERANCE);
-
-        assert_eq!(max_abs_error.unwrap(), 0.5);
-    }
-
-    #[test]
-    fn compare_rejects_a_value_outside_the_tolerance() {
-        let error = compare("prefill_q", &[1.0, 3.0], &[1.0, 2.0], TOLERANCE).unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "prefill_q differs from its fixture by up to 1, allowed 0.5 + 0 * |expected|"
-        );
-    }
-
-    #[test]
-    fn compare_rejects_nan() {
-        assert!(matches!(
-            compare("case", &[f32::NAN], &[1.0], TOLERANCE),
-            Err(ModelError::FixtureMismatch { .. })
-        ));
     }
 }

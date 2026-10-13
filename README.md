@@ -99,6 +99,10 @@ The GPU smoke test starts with a small cuTile vector add, then runs the first
 real inference kernel: RMSNorm. RMSNorm is checked against PyTorch fixtures at
 hidden sizes 128, 2048 and 2560, with both float32 and bfloat16 coverage.
 
+The RoPE kernel rotates the fixture's query and key tensors with the reference
+`cos` and `sin` tables, at positions from 0 to 32767. The tables are generated
+in Rust on the host and compared with the reference tables separately.
+
 It also checks matrix multiplication through cuBLAS. Tensors are row-major and
 cuBLAS is column-major, so the test multiplies small non-square matrices, with
 and without a transposed right operand, and compares them with a host

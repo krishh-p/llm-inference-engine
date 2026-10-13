@@ -4,6 +4,7 @@
 #[cfg(feature = "cuda")]
 pub use kernels::{
     rms_norm_kernel::{rms_norm_bf16, rms_norm_f32},
+    rope_kernel::rope_f32,
     vector_add_kernel::vector_add,
 };
 
@@ -56,6 +57,40 @@ mod kernels {
             let weight: Tile<bf16, { [H] }> = load_tile(weight, shape![H], [0]);
             let weight = weight.reshape(shape![1, H]);
             output.store(normalized * weight);
+        }
+    }
+
+    #[cutile::module]
+    pub mod rope_kernel {
+        #[allow(clippy::wildcard_imports)]
+        use cutile::core::*;
+
+        /// Rotates one token of one head. The tile holds the two halves of
+        /// its vector as two rows, and row `i` of the first half pairs with
+        /// row `i` of the second.
+        #[cutile::entry()]
+        pub fn rope_f32<const HALF: i32>(
+            output: &mut Tensor<f32, { [1, 2, HALF] }>,
+            input: &Tensor<f32, { [-1, -1, -1] }>,
+            cos: &Tensor<f32, { [-1, -1] }>,
+            sin: &Tensor<f32, { [-1, -1] }>,
+        ) {
+            let x: Tile<f32, { [1, 2, HALF] }> = load_tile_like(input, output);
+            let first: Tile<i32, { [] }> = scalar_to_tile(0i32);
+            let second: Tile<i32, { [] }> = scalar_to_tile(1i32);
+            let a: Tile<f32, { [1, 1, HALF] }> = extract(x, [first, first, first]);
+            let b: Tile<f32, { [1, 1, HALF] }> = extract(x, [first, second, first]);
+
+            // The tables have one row per token, shared by every head.
+            let block: (i32, i32, i32) = get_tile_block_id();
+            let cos: Tile<f32, { [1, HALF] }> = load_tile(cos, shape![1, HALF], [block.1, 0i32]);
+            let sin: Tile<f32, { [1, HALF] }> = load_tile(sin, shape![1, HALF], [block.1, 0i32]);
+            let cos = cos.reshape(shape![1, 1, HALF]);
+            let sin = sin.reshape(shape![1, 1, HALF]);
+
+            let rotated: Tile<f32, { [1, 2, HALF] }> =
+                cat(a * cos - b * sin, b * cos + a * sin, 1i32);
+            output.store(rotated);
         }
     }
 

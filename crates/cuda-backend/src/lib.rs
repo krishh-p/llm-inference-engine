@@ -1,10 +1,12 @@
 use std::path::Path;
 
+use engine_core::Tolerance;
 use serde::Serialize;
 use thiserror::Error;
 
 mod matmul;
 mod rms_norm;
+mod rope;
 
 #[cfg(feature = "cuda")]
 mod backend;
@@ -96,6 +98,35 @@ pub struct MatmulResult {
     pub cases: Vec<MatmulCaseResult>,
 }
 
+/// How closely the `RoPE` tables generated in Rust match the reference tables.
+#[derive(Debug, Serialize)]
+pub struct RopeTableResult {
+    pub positions: Vec<u32>,
+    pub cos_max_abs_error: f32,
+    pub sin_max_abs_error: f32,
+    pub tolerance: Tolerance,
+    pub passed: bool,
+}
+
+/// Correctness data for one tensor rotated by the `RoPE` kernel.
+#[derive(Debug, Serialize)]
+pub struct RopeCaseResult {
+    pub name: &'static str,
+    pub heads: usize,
+    pub rows: usize,
+    pub head_dim: usize,
+    pub max_abs_error: f32,
+    pub tolerance: Tolerance,
+    pub passed: bool,
+}
+
+/// `RoPE` table and kernel results.
+#[derive(Debug, Serialize)]
+pub struct RopeResult {
+    pub tables: RopeTableResult,
+    pub cases: Vec<RopeCaseResult>,
+}
+
 /// Complete output from the Rust CUDA smoke test.
 #[derive(Debug, Serialize)]
 pub struct SmokeReport {
@@ -103,6 +134,7 @@ pub struct SmokeReport {
     pub cutile_version: &'static str,
     pub vector_add: VectorAddResult,
     pub rms_norm: RmsNormResult,
+    pub rope: RopeResult,
     pub matmul: MatmulResult,
 }
 
@@ -161,6 +193,9 @@ pub enum BackendError {
     #[error("invalid RMSNorm fixture: {0}")]
     RmsNormFixture(String),
 
+    #[error("invalid RoPE fixture: {0}")]
+    RopeFixture(String),
+
     #[error("{case} returned {actual} values, expected {expected}")]
     OutputLength {
         case: String,
@@ -183,12 +218,14 @@ pub enum BackendError {
 ///
 /// # Errors
 ///
-/// Returns an error when the fixture is invalid, CUDA is unavailable or a
+/// Returns an error when a fixture is invalid, CUDA is unavailable or a
 /// kernel fails verification.
-pub fn run_smoke(rms_norm_fixture: impl AsRef<Path>) -> Result<SmokeReport, BackendError> {
+pub fn run_smoke(fixture_dir: impl AsRef<Path>) -> Result<SmokeReport, BackendError> {
+    let fixture_dir = fixture_dir.as_ref();
     check_element_count(VECTOR_ELEMENTS)?;
-    let fixtures = rms_norm::load_fixtures(rms_norm_fixture.as_ref())?;
-    run_smoke_on_gpu(fixtures)
+    let rms_norm = rms_norm::load_fixtures(&fixture_dir.join("rms_norm.safetensors"))?;
+    let rope = rope::load_fixtures(fixture_dir)?;
+    run_smoke_on_gpu(rms_norm, &rope)
 }
 
 fn check_element_count(elements: usize) -> Result<(), BackendError> {
@@ -213,12 +250,18 @@ fn check_rms_norm_shape(rows: usize, hidden_size: usize) -> Result<(), BackendEr
 }
 
 #[cfg(feature = "cuda")]
-fn run_smoke_on_gpu(fixtures: rms_norm::RmsNormFixtures) -> Result<SmokeReport, BackendError> {
-    gpu::run_smoke(fixtures)
+fn run_smoke_on_gpu(
+    rms_norm: rms_norm::RmsNormFixtures,
+    rope: &rope::RopeFixtures,
+) -> Result<SmokeReport, BackendError> {
+    gpu::run_smoke(rms_norm, rope)
 }
 
 #[cfg(not(feature = "cuda"))]
-fn run_smoke_on_gpu(_fixtures: rms_norm::RmsNormFixtures) -> Result<SmokeReport, BackendError> {
+fn run_smoke_on_gpu(
+    _rms_norm: rms_norm::RmsNormFixtures,
+    _rope: &rope::RopeFixtures,
+) -> Result<SmokeReport, BackendError> {
     Err(BackendError::CudaDisabled)
 }
 
