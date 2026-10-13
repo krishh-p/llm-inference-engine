@@ -13,8 +13,8 @@ fn committed_fixture_manifest_matches_its_files() {
     let validation = manifest.validate_files(&directory).unwrap();
 
     assert_eq!(validation.file_count, 5);
-    assert_eq!(validation.tensor_count, 42);
-    assert_eq!(validation.total_bytes, 1_391_672);
+    assert_eq!(validation.tensor_count, 51);
+    assert_eq!(validation.total_bytes, 1_571_048);
     assert_eq!(
         manifest
             .files

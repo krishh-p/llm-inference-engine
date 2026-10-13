@@ -6,17 +6,41 @@ use cuda_kernels::{rms_norm_bf16, rms_norm_f32, vector_add};
 use cutile::half::bf16;
 use cutile::prelude::*;
 
-use crate::rms_norm::{RmsNormF32Case, reference_f32};
+use crate::rms_norm::{RmsNormBf16Case, RmsNormF32Case, RmsNormFixtures};
 use crate::{
-    BackendError, GpuInfo, RmsNormCaseResult, RmsNormResult, SmokeReport, VECTOR_ELEMENTS,
-    VECTOR_TILE_ELEMENTS, VectorAddResult, check_rms_norm_shape,
+    BackendError, GpuInfo, KernelBenchmark, RmsNormCaseResult, RmsNormResult, SmokeReport,
+    VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS, VectorAddResult, check_rms_norm_shape,
 };
 
 const VECTOR_MAX_ABS_ERROR: f32 = 1.0e-6;
 const F32_TOLERANCE: f32 = 1.0e-5;
 const BF16_TOLERANCE: f32 = 1.0e-2;
+const BENCHMARK_WARMUP_ITERATIONS: usize = 10;
+const BENCHMARK_ITERATIONS: usize = 100;
 
-pub(super) fn run_smoke(fixture: RmsNormF32Case) -> Result<SmokeReport, BackendError> {
+struct RmsNormParams {
+    rows: usize,
+    hidden_size: usize,
+    tile_hidden_size: usize,
+    inverse_hidden_size: f32,
+    epsilon: f32,
+}
+
+impl RmsNormParams {
+    fn new(rows: usize, hidden_size: usize, epsilon: f32) -> Self {
+        Self {
+            rows,
+            hidden_size,
+            // The tile width is rounded up to a power of two. The padding adds
+            // nothing to the sum, and the mean still divides by the real width.
+            tile_hidden_size: hidden_size.next_power_of_two(),
+            inverse_hidden_size: inverse_hidden_size(hidden_size),
+            epsilon,
+        }
+    }
+}
+
+pub(super) fn run_smoke(fixtures: RmsNormFixtures) -> Result<SmokeReport, BackendError> {
     let visible_device_count = Device::device_count().map_err(cuda_error)?;
     if visible_device_count == 0 {
         return Err(BackendError::Cuda("no CUDA devices are visible".to_owned()));
@@ -28,7 +52,7 @@ pub(super) fn run_smoke(fixture: RmsNormF32Case) -> Result<SmokeReport, BackendE
     let compute_capability = compute_capability(&device)?;
 
     let vector_add = run_vector_add(&stream)?;
-    let rms_norm = run_rms_norm_suite(&stream, fixture)?;
+    let rms_norm = run_rms_norm_suite(&stream, fixtures)?;
 
     Ok(SmokeReport {
         gpu: GpuInfo {
@@ -116,58 +140,36 @@ fn run_vector_add(stream: &Arc<Stream>) -> Result<VectorAddResult, BackendError>
 
 fn run_rms_norm_suite(
     stream: &Arc<Stream>,
-    fixture: RmsNormF32Case,
+    fixtures: RmsNormFixtures,
 ) -> Result<RmsNormResult, BackendError> {
-    let mut cases = Vec::with_capacity(3);
+    let case_count = fixtures.f32_cases.len() + fixtures.bf16_cases.len();
+    let mut cases = Vec::with_capacity(case_count);
 
-    cases.push(run_rms_norm_f32(
-        stream,
-        "qwen3_fixture_f32",
-        "golden_fixture",
-        fixture,
-    )?);
-
-    let rows = 3;
-    let hidden_size = 128;
-    let epsilon = 1.0e-6;
-    let input = synthetic_input(rows * hidden_size);
-    let weight = synthetic_weight(hidden_size);
-    let expected = reference_f32(&input, &weight, rows, hidden_size, epsilon);
-    cases.push(run_rms_norm_f32(
-        stream,
-        "synthetic_128_f32",
-        "rust_reference",
-        RmsNormF32Case {
-            rows,
-            hidden_size,
-            input,
-            weight,
-            epsilon,
-            expected,
-        },
-    )?);
-
-    cases.push(run_rms_norm_bf16(stream)?);
+    for case in fixtures.f32_cases {
+        cases.push(run_rms_norm_f32(stream, case, fixtures.epsilon)?);
+    }
+    for case in fixtures.bf16_cases {
+        cases.push(run_rms_norm_bf16(stream, case, fixtures.epsilon)?);
+    }
 
     Ok(RmsNormResult { cases })
 }
 
 fn run_rms_norm_f32(
     stream: &Arc<Stream>,
-    name: &'static str,
-    source: &'static str,
     case: RmsNormF32Case,
+    epsilon: f32,
 ) -> Result<RmsNormCaseResult, BackendError> {
     let RmsNormF32Case {
+        name,
         rows,
         hidden_size,
         input,
         weight,
-        epsilon,
         expected,
     } = case;
     check_rms_norm_shape(rows, hidden_size)?;
-    let inverse_hidden_size = inverse_hidden_size(hidden_size);
+    let params = RmsNormParams::new(rows, hidden_size, epsilon);
     let input_host = Arc::new(input);
     let weight_host = Arc::new(weight);
 
@@ -183,52 +185,57 @@ fn run_rms_norm_f32(
         .sync_on(stream)
         .map_err(cutile_error)?;
 
-    let _ = rms_norm_f32(
-        (&mut output).partition([1, hidden_size]),
-        &input,
-        &weight,
-        inverse_hidden_size,
-        epsilon,
-    )
-    .sync_on(stream)
-    .map_err(cutile_error)?;
+    launch_rms_norm_f32(stream, &mut output, &input, &weight, &params)?;
+    let benchmark = benchmark_rms_norm_f32(stream, &mut output, &input, &weight, &params)?;
 
     let actual = output.to_host_vec().sync_on(stream).map_err(cutile_error)?;
     let max_abs_error = verify(name, &actual, &expected, F32_TOLERANCE)?;
 
     Ok(RmsNormCaseResult {
         name,
-        source,
+        source: "pytorch_fixture",
         dtype: "float32",
         rows,
         hidden_size,
         epsilon,
         max_abs_error,
         tolerance: F32_TOLERANCE,
+        benchmark,
         passed: true,
     })
 }
 
-fn run_rms_norm_bf16(stream: &Arc<Stream>) -> Result<RmsNormCaseResult, BackendError> {
-    let name = "synthetic_512_bfloat16";
-    let rows = 2;
-    let hidden_size = 512;
-    let epsilon = 1.0e-6;
+fn run_rms_norm_bf16(
+    stream: &Arc<Stream>,
+    case: RmsNormBf16Case,
+    epsilon: f32,
+) -> Result<RmsNormCaseResult, BackendError> {
+    let RmsNormBf16Case {
+        name,
+        rows,
+        hidden_size,
+        input_bits,
+        weight_bits,
+        expected_bits,
+    } = case;
     check_rms_norm_shape(rows, hidden_size)?;
 
     let input_host = Arc::new(
-        synthetic_input(rows * hidden_size)
+        input_bits
             .into_iter()
-            .map(bf16::from_f32)
+            .map(bf16::from_bits)
             .collect::<Vec<_>>(),
     );
     let weight_host = Arc::new(
-        synthetic_weight(hidden_size)
+        weight_bits
             .into_iter()
-            .map(bf16::from_f32)
+            .map(bf16::from_bits)
             .collect::<Vec<_>>(),
     );
-    let expected = reference_bf16(&input_host, &weight_host, rows, hidden_size, epsilon);
+    let expected = expected_bits
+        .into_iter()
+        .map(|bits| bf16::from_bits(bits).to_f32())
+        .collect::<Vec<_>>();
 
     let input = api::copy_host_vec_to_device(&input_host)
         .sync_on(stream)
@@ -241,85 +248,155 @@ fn run_rms_norm_bf16(stream: &Arc<Stream>) -> Result<RmsNormCaseResult, BackendE
     let mut output = api::zeros::<bf16>(&[rows, hidden_size])
         .sync_on(stream)
         .map_err(cutile_error)?;
+    let params = RmsNormParams::new(rows, hidden_size, epsilon);
 
-    let _ = rms_norm_bf16(
-        (&mut output).partition([1, hidden_size]),
-        &input,
-        &weight,
-        inverse_hidden_size(hidden_size),
-        epsilon,
-    )
-    .sync_on(stream)
-    .map_err(cutile_error)?;
+    launch_rms_norm_bf16(stream, &mut output, &input, &weight, &params)?;
+    let benchmark = benchmark_rms_norm_bf16(stream, &mut output, &input, &weight, &params)?;
 
     let actual = output.to_host_vec().sync_on(stream).map_err(cutile_error)?;
-    let actual_f32 = actual
+    let actual = actual
         .iter()
         .map(|value| value.to_f32())
         .collect::<Vec<_>>();
-    let expected_f32 = expected
-        .iter()
-        .map(|value| value.to_f32())
-        .collect::<Vec<_>>();
-    let max_abs_error = verify(name, &actual_f32, &expected_f32, BF16_TOLERANCE)?;
+    let max_abs_error = verify(name, &actual, &expected, BF16_TOLERANCE)?;
 
     Ok(RmsNormCaseResult {
         name,
-        source: "rust_reference",
+        source: "pytorch_fixture",
         dtype: "bfloat16",
         rows,
         hidden_size,
         epsilon,
         max_abs_error,
         tolerance: BF16_TOLERANCE,
+        benchmark,
         passed: true,
     })
 }
 
-fn reference_bf16(
-    input: &[bf16],
-    weight: &[bf16],
-    rows: usize,
-    hidden_size: usize,
-    epsilon: f32,
-) -> Vec<bf16> {
-    let hidden_size_f32 =
-        f32::from(u16::try_from(hidden_size).expect("validated RMSNorm hidden size fits in u16"));
-    let mut output = Vec::with_capacity(input.len());
+fn launch_rms_norm_f32(
+    stream: &Arc<Stream>,
+    output: &mut Tensor<f32>,
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    params: &RmsNormParams,
+) -> Result<(), BackendError> {
+    let _ = rms_norm_f32(
+        output.partition([1, params.tile_hidden_size]),
+        input,
+        weight,
+        params.inverse_hidden_size,
+        params.epsilon,
+    )
+    .sync_on(stream)
+    .map_err(cutile_error)?;
+    Ok(())
+}
 
-    for row in input.chunks_exact(hidden_size).take(rows) {
-        let mean_square = row
-            .iter()
-            .map(|value| {
-                let value = value.to_f32();
-                value * value
-            })
-            .sum::<f32>()
-            / hidden_size_f32;
-        let inverse_rms = (mean_square + epsilon).sqrt().recip();
-        output.extend(row.iter().zip(weight).map(|(value, scale)| {
-            let normalized = bf16::from_f32(value.to_f32() * inverse_rms);
-            bf16::from_f32(normalized.to_f32() * scale.to_f32())
-        }));
+fn launch_rms_norm_bf16(
+    stream: &Arc<Stream>,
+    output: &mut Tensor<bf16>,
+    input: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    params: &RmsNormParams,
+) -> Result<(), BackendError> {
+    let _ = rms_norm_bf16(
+        output.partition([1, params.tile_hidden_size]),
+        input,
+        weight,
+        params.inverse_hidden_size,
+        params.epsilon,
+    )
+    .sync_on(stream)
+    .map_err(cutile_error)?;
+    Ok(())
+}
+
+fn benchmark_rms_norm_f32(
+    stream: &Arc<Stream>,
+    output: &mut Tensor<f32>,
+    input: &Tensor<f32>,
+    weight: &Tensor<f32>,
+    params: &RmsNormParams,
+) -> Result<KernelBenchmark, BackendError> {
+    for _ in 0..BENCHMARK_WARMUP_ITERATIONS {
+        launch_rms_norm_f32(stream, output, input, weight, params)?;
     }
-
-    output
+    let timings = measure(stream, BENCHMARK_ITERATIONS, || {
+        launch_rms_norm_f32(stream, output, input, weight, params)
+    })?;
+    Ok(summarize(
+        timings,
+        logical_bytes(params.rows, params.hidden_size, 4),
+    ))
 }
 
-fn synthetic_input(elements: usize) -> Vec<f32> {
-    (-16_i16..=16)
-        .cycle()
-        .map(|value| f32::from(value) / 8.0)
-        .take(elements)
-        .collect()
+fn benchmark_rms_norm_bf16(
+    stream: &Arc<Stream>,
+    output: &mut Tensor<bf16>,
+    input: &Tensor<bf16>,
+    weight: &Tensor<bf16>,
+    params: &RmsNormParams,
+) -> Result<KernelBenchmark, BackendError> {
+    for _ in 0..BENCHMARK_WARMUP_ITERATIONS {
+        launch_rms_norm_bf16(stream, output, input, weight, params)?;
+    }
+    let timings = measure(stream, BENCHMARK_ITERATIONS, || {
+        launch_rms_norm_bf16(stream, output, input, weight, params)
+    })?;
+    Ok(summarize(
+        timings,
+        logical_bytes(params.rows, params.hidden_size, 2),
+    ))
 }
 
-fn synthetic_weight(hidden_size: usize) -> Vec<f32> {
-    (0_i16..11)
-        .cycle()
-        .map(|value| 0.9 + f32::from(value) / 100.0)
-        .take(hidden_size)
-        .collect()
+fn measure(
+    stream: &Arc<Stream>,
+    iterations: usize,
+    mut run: impl FnMut() -> Result<(), BackendError>,
+) -> Result<Vec<f64>, BackendError> {
+    let mut timings = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let started = stream.device().new_event().map_err(cuda_error)?;
+        let finished = stream.device().new_event().map_err(cuda_error)?;
+        started.record(stream).map_err(cuda_error)?;
+        run()?;
+        finished.record(stream).map_err(cuda_error)?;
+        finished.synchronize().map_err(cuda_error)?;
+        timings.push(f64::from(
+            started.elapsed_time(&finished).map_err(cuda_error)?,
+        ));
+    }
+    Ok(timings)
+}
+
+fn summarize(mut timings: Vec<f64>, logical_bytes: usize) -> KernelBenchmark {
+    timings.sort_by(f64::total_cmp);
+    let median_ms = percentile(&timings, 50);
+    let p95_ms = percentile(&timings, 95);
+    let logical_bytes =
+        u32::try_from(logical_bytes).expect("an RMSNorm fixture fits in four gigabytes");
+    let effective_bandwidth_gbps = f64::from(logical_bytes) / (median_ms / 1_000.0) / 1.0e9;
+
+    KernelBenchmark {
+        warmup_iterations: BENCHMARK_WARMUP_ITERATIONS,
+        measured_iterations: timings.len(),
+        min_ms: timings[0],
+        median_ms,
+        p95_ms,
+        effective_bandwidth_gbps,
+        launches_per_iteration: 1,
+    }
+}
+
+fn percentile(sorted: &[f64], percentile: usize) -> f64 {
+    let index = (sorted.len() - 1) * percentile / 100;
+    sorted[index]
+}
+
+fn logical_bytes(rows: usize, hidden_size: usize, element_bytes: usize) -> usize {
+    // Each row reads its input and weight once, then writes one output row.
+    rows * hidden_size * element_bytes * 3
 }
 
 fn inverse_hidden_size(hidden_size: usize) -> f32 {

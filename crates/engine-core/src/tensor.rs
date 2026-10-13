@@ -185,6 +185,37 @@ impl OwnedTensor {
             .map(|bytes| f32::from_le_bytes(*bytes))
             .collect())
     }
+
+    /// Decodes the raw bits of a bfloat16 tensor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor is not bfloat16 or its byte length does
+    /// not match its shape.
+    pub fn to_bf16_bits(&self) -> crate::Result<Vec<u16>> {
+        if self.descriptor.layout.dtype != DType::BFloat16 {
+            return Err(crate::EngineError::TensorDtype {
+                name: self.descriptor.name.clone(),
+                expected: "bfloat16",
+                actual: self.descriptor.layout.dtype.to_string(),
+            });
+        }
+
+        let expected = self.descriptor.layout.element_count() * size_of::<u16>();
+        if self.bytes.len() != expected {
+            return Err(crate::EngineError::TensorDataLength {
+                name: self.descriptor.name.clone(),
+                expected,
+                actual: self.bytes.len(),
+            });
+        }
+
+        let (values, _) = self.bytes.as_chunks::<{ size_of::<u16>() }>();
+        Ok(values
+            .iter()
+            .map(|bytes| u16::from_le_bytes(*bytes))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +252,21 @@ mod tests {
         };
 
         assert_eq!(tensor.to_f32_vec().unwrap(), vec![1.5, -2.25]);
+    }
+
+    #[test]
+    fn decodes_bfloat16_tensor_bits() {
+        let tensor = OwnedTensor {
+            descriptor: TensorDescriptor {
+                name: "values".to_owned(),
+                layout: TensorLayout::contiguous(DType::BFloat16, vec![2]),
+                device: Device::Cpu,
+                owner: BufferOwner::ModelFile(PathBuf::from("fixture.safetensors")),
+                byte_len: 4,
+            },
+            bytes: [0x3f80_u16.to_le_bytes(), 0xc010_u16.to_le_bytes()].concat(),
+        };
+
+        assert_eq!(tensor.to_bf16_bits().unwrap(), vec![0x3f80, 0xc010]);
     }
 }

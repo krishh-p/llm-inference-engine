@@ -96,9 +96,8 @@ and direct dependency versions are committed for reproducible builds.
 ## Rust CUDA smoke test
 
 The GPU smoke test starts with a small cuTile vector add, then runs the first
-real inference kernel: RMSNorm. RMSNorm is checked against the Qwen3 golden
-fixture in float32, and against synthetic float32 and bfloat16 cases at other
-hidden sizes.
+real inference kernel: RMSNorm. RMSNorm is checked against PyTorch fixtures at
+hidden sizes 128, 2048 and 2560, with both float32 and bfloat16 coverage.
 
 ```bash
 make rust-smoke
@@ -106,8 +105,12 @@ make rust-smoke
 
 The pinned CUDA image builds the Rust binary on Modal, so this command works
 from a machine without a local NVIDIA GPU. It writes the GPU, toolchain,
-vector-add timings and kernel verification results to
+100-run warm benchmarks, profiler status and kernel verification results to
 `results/rust-smoke-*.json`.
+
+Every case here is about ten thousand elements or fewer, so the timings mostly
+measure launch overhead. Nsight Compute runs on Modal. Nsight Systems captures a trace but fails
+to import it into a report, and the result file records that failure.
 
 ## Cost and cache
 See [Modal pricing](https://modal.com/pricing).

@@ -54,10 +54,74 @@
             2048
           ],
           "dtype": "float32"
+        },
+        "q_input": {
+          "shape": [
+            80,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "q_weight": {
+          "shape": [
+            128
+          ],
+          "dtype": "float32"
+        },
+        "q_output": {
+          "shape": [
+            80,
+            128
+          ],
+          "dtype": "float32"
+        },
+        "bf16_input": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "bfloat16"
+        },
+        "bf16_weight": {
+          "shape": [
+            2048
+          ],
+          "dtype": "bfloat16"
+        },
+        "bf16_output": {
+          "shape": [
+            5,
+            2048
+          ],
+          "dtype": "bfloat16"
+        },
+        "wide_input": {
+          "shape": [
+            2,
+            2560
+          ],
+          "dtype": "float32"
+        },
+        "wide_weight": {
+          "shape": [
+            2560
+          ],
+          "dtype": "float32"
+        },
+        "wide_output": {
+          "shape": [
+            2,
+            2560
+          ],
+          "dtype": "float32"
         }
       },
-      "bytes": 90388,
-      "sha256": "290e164e9b18d3145347e54fa9071057d6d97f2297bf69a737699002eae31e5a"
+      "tolerances": {
+        "float32_atol": 1e-05,
+        "bfloat16_atol": 0.01
+      },
+      "bytes": 269764,
+      "sha256": "33b514e4dcbb6bc2a8d43d9b20887f25ef8618394ea229cbab053433cfc96d41"
     },
     "rope.safetensors": {
       "tensors": {

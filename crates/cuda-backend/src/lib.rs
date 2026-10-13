@@ -10,9 +10,8 @@ mod gpu;
 
 const VECTOR_ELEMENTS: usize = 4096;
 const VECTOR_TILE_ELEMENTS: usize = 256;
-// Only power-of-two widths up to 2048 have been run on the GPU so far. This is
-// the validated range, not a known cuTile limit.
-const MAX_RMS_NORM_HIDDEN_SIZE: usize = 2048;
+const RMS_NORM_HIDDEN_SIZE_MULTIPLE: usize = 32;
+const MAX_RMS_NORM_HIDDEN_SIZE: usize = 8192;
 
 /// GPU information captured by the smoke test.
 #[derive(Debug, Serialize)]
@@ -47,7 +46,20 @@ pub struct RmsNormCaseResult {
     pub epsilon: f32,
     pub max_abs_error: f32,
     pub tolerance: f32,
+    pub benchmark: KernelBenchmark,
     pub passed: bool,
+}
+
+/// Repeated warm-kernel timing for one case.
+#[derive(Debug, Serialize)]
+pub struct KernelBenchmark {
+    pub warmup_iterations: usize,
+    pub measured_iterations: usize,
+    pub min_ms: f64,
+    pub median_ms: f64,
+    pub p95_ms: f64,
+    pub effective_bandwidth_gbps: f64,
+    pub launches_per_iteration: usize,
 }
 
 /// `RMSNorm` correctness results.
@@ -74,7 +86,9 @@ pub enum BackendError {
     #[error("RMSNorm needs at least one row and one hidden element, got [{rows}, {hidden_size}]")]
     InvalidRmsNormShape { rows: usize, hidden_size: usize },
 
-    #[error("RMSNorm supports power-of-two hidden sizes up to {MAX_RMS_NORM_HIDDEN_SIZE}, got {0}")]
+    #[error(
+        "RMSNorm currently supports hidden sizes divisible by {RMS_NORM_HIDDEN_SIZE_MULTIPLE} up to {MAX_RMS_NORM_HIDDEN_SIZE}, got {0}"
+    )]
     UnsupportedHiddenSize(usize),
 
     #[error("the CUDA backend requires Linux")]
@@ -115,8 +129,8 @@ pub enum BackendError {
 /// kernel fails verification.
 pub fn run_smoke(rms_norm_fixture: impl AsRef<Path>) -> Result<SmokeReport, BackendError> {
     check_element_count(VECTOR_ELEMENTS)?;
-    let fixture = rms_norm::load_fixture(rms_norm_fixture.as_ref())?;
-    run_smoke_on_gpu(fixture)
+    let fixtures = rms_norm::load_fixtures(rms_norm_fixture.as_ref())?;
+    run_smoke_on_gpu(fixtures)
 }
 
 fn check_element_count(elements: usize) -> Result<(), BackendError> {
@@ -130,19 +144,23 @@ fn check_rms_norm_shape(rows: usize, hidden_size: usize) -> Result<(), BackendEr
     if rows == 0 || hidden_size == 0 {
         return Err(BackendError::InvalidRmsNormShape { rows, hidden_size });
     }
-    if !hidden_size.is_power_of_two() || hidden_size > MAX_RMS_NORM_HIDDEN_SIZE {
+    // This kernel maps one complete row to a tile. Widths 128, 2048 and 2560
+    // have been run on the GPU. Other multiples of 32 are accepted but untested.
+    if !hidden_size.is_multiple_of(RMS_NORM_HIDDEN_SIZE_MULTIPLE)
+        || hidden_size > MAX_RMS_NORM_HIDDEN_SIZE
+    {
         return Err(BackendError::UnsupportedHiddenSize(hidden_size));
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn run_smoke_on_gpu(fixture: rms_norm::RmsNormF32Case) -> Result<SmokeReport, BackendError> {
-    gpu::run_smoke(fixture)
+fn run_smoke_on_gpu(fixtures: rms_norm::RmsNormFixtures) -> Result<SmokeReport, BackendError> {
+    gpu::run_smoke(fixtures)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run_smoke_on_gpu(_fixture: rms_norm::RmsNormF32Case) -> Result<SmokeReport, BackendError> {
+fn run_smoke_on_gpu(_fixtures: rms_norm::RmsNormFixtures) -> Result<SmokeReport, BackendError> {
     Err(BackendError::UnsupportedPlatform)
 }
 
@@ -169,6 +187,11 @@ mod tests {
     #[test]
     fn accepts_qwen3_hidden_size() {
         assert!(check_rms_norm_shape(5, 2048).is_ok());
+    }
+
+    #[test]
+    fn accepts_qwen3_4b_hidden_size() {
+        assert!(check_rms_norm_shape(2, 2560).is_ok());
     }
 
     #[test]

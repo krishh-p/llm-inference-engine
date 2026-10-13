@@ -13,6 +13,8 @@ PROMPT = "The capital of France is"
 MAX_NEW_TOKENS = 4
 ROPE_ROTATION_ATOL = 1e-5
 ROPE_TABLE_ATOL = 1e-2
+RMS_NORM_FLOAT32_ATOL = 1e-5
+RMS_NORM_BFLOAT16_ATOL = 1e-2
 
 SOURCE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = modal_common.find_project_root(__file__)
@@ -151,12 +153,56 @@ def build_fixtures() -> dict[str, object]:
     q_rope = qwen3.apply_rope(q_input, rope_cos, rope_sin)
     k_rope = qwen3.apply_rope(k_input, rope_cos, rope_sin)
 
+    q_norm_input = trace[layer + "q"].reshape(-1, model.config.head_dim)
+    q_norm_weight = weights[layer_weights + "self_attn.q_norm.weight"]
+    q_norm_output = trace[layer + "q_norm"].reshape(-1, model.config.head_dim)
+
+    bf16_input = trace[layer + "input"].to(torch.bfloat16)
+    bf16_weight = weights[layer_weights + "input_layernorm.weight"].to(torch.bfloat16)
+    bf16_output = qwen3.rms_norm(
+        bf16_input,
+        bf16_weight,
+        model.config.rms_norm_eps,
+    )
+
+    # 2560 is the hidden size used by Qwen3-4B. This keeps shape support from
+    # accidentally depending on the 2048-wide model used to generate fixtures.
+    wide_hidden_size = 2560
+    wide_input = torch.linspace(
+        -2.0,
+        2.0,
+        steps=2 * wide_hidden_size,
+        device=prompt_ids.device,
+        dtype=torch.float32,
+    ).reshape(2, wide_hidden_size)
+    wide_weight = torch.linspace(
+        0.9,
+        1.1,
+        steps=wide_hidden_size,
+        device=prompt_ids.device,
+        dtype=torch.float32,
+    )
+    wide_output = qwen3.rms_norm(
+        wide_input,
+        wide_weight,
+        model.config.rms_norm_eps,
+    )
+
     cases = {
         "rms_norm.safetensors": {
             "input": trace[layer + "input"],
             "weight": weights[layer_weights + "input_layernorm.weight"],
             "eps": torch.tensor(model.config.rms_norm_eps, dtype=torch.float32),
             "output": trace[layer + "input_norm"],
+            "q_input": q_norm_input,
+            "q_weight": q_norm_weight,
+            "q_output": q_norm_output,
+            "bf16_input": bf16_input,
+            "bf16_weight": bf16_weight,
+            "bf16_output": bf16_output,
+            "wide_input": wide_input,
+            "wide_weight": wide_weight,
+            "wide_output": wide_output,
         },
         "rope.safetensors": {
             "q_input": q_input,
@@ -214,6 +260,10 @@ def build_fixtures() -> dict[str, object]:
     file_info["rope.safetensors"]["tolerances"] = {
         "rotation_atol": ROPE_ROTATION_ATOL,
         "table_atol": ROPE_TABLE_ATOL,
+    }
+    file_info["rms_norm.safetensors"]["tolerances"] = {
+        "float32_atol": RMS_NORM_FLOAT32_ATOL,
+        "bfloat16_atol": RMS_NORM_BFLOAT16_ATOL,
     }
 
     manifest = {
