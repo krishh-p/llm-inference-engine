@@ -27,6 +27,8 @@ This is also the Hugging Face baseline. After one warmup run it times the
 first token and every decode step, and writes them to `results/smoke-*.json`
 under the same field names the Rust engine uses. It loads the model in
 bfloat16 by default. Use `make dev DTYPE=float32` to match the Rust engine.
+In both engines the load time covers reading the weights and putting them on
+the GPU. Loading the tokenizer and setting up CUDA are not counted.
 
 Run the manual Qwen3 reference and compare it with Hugging Face:
 

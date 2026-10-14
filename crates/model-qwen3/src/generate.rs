@@ -18,7 +18,8 @@ pub struct Completion {
 /// finish, so they include the GPU time too.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metrics {
-    /// Opening the GPU, widening every weight to float32 and uploading it.
+    /// Reading every weight, widening it to float32 and uploading it. Opening
+    /// the tokenizer and setting up CUDA are not counted.
     pub model_load_seconds: f64,
     /// Generations run before the measured one.
     pub warmup_runs: usize,
@@ -90,8 +91,9 @@ fn complete_on_gpu(
 
     use crate::model::Model;
 
-    let load_started = Instant::now();
+    // load time covers the weights only, the same as the Python baseline
     let backend = cuda_backend::Backend::new()?;
+    let load_started = Instant::now();
     let model = Model::load(&backend, artifacts)?;
     let model_load_seconds = load_started.elapsed().as_secs_f64();
 

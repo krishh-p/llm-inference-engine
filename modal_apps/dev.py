@@ -84,12 +84,13 @@ def smoke_test(dtype: str) -> dict[str, object]:
 
     torch.cuda.reset_peak_memory_stats()
 
-    load_started = time.perf_counter()
-
     tokenizer = AutoTokenizer.from_pretrained(
         modal_common.MODEL_NAME,
         revision=MODEL_REVISION,
     )
+
+    # load time covers the weights only, the same as the rust engine
+    load_started = time.perf_counter()
     model = AutoModelForCausalLM.from_pretrained(
         modal_common.MODEL_NAME,
         revision=MODEL_REVISION,
