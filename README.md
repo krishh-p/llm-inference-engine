@@ -172,6 +172,10 @@ the next token. Generation ends at the end-of-sequence token or after
 so one extra run treats a token it is known to generate as the end-of-sequence
 token and checks that generation stops right after it.
 
+Every one of those runs is repeated without caches: for each new token, the
+whole sequence so far runs again from the start. Both ways must pick the same
+tokens, which shows the caches hold exactly what recomputing would produce.
+
 ```bash
 make rust-verify
 ```

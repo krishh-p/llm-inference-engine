@@ -187,12 +187,13 @@ pub fn verify_model(
 ///
 /// One more run of the first prompt treats its second expected token as the
 /// end-of-sequence token, and checks that generation stops right after it.
+/// Every run is repeated without caches, and both must pick the same tokens.
 ///
 /// # Errors
 ///
 /// Returns an error when a weight cannot be loaded, the GPU is unavailable,
-/// there is no first prompt with at least two expected tokens, or any run
-/// generates different tokens.
+/// there is no first prompt with at least two expected tokens, any run
+/// generates different tokens, or the cached and uncached runs disagree.
 pub fn verify_generation(
     artifacts: &Qwen3Artifacts,
     prompts: &RegressionPromptSet,
@@ -395,7 +396,7 @@ fn generate_on_gpu(
     artifacts: &Qwen3Artifacts,
     prompts: &RegressionPromptSet,
 ) -> Result<Vec<GenerationResult>> {
-    use crate::generate::generate;
+    use crate::generate::{generate, generate_uncached};
     use crate::model::Model;
 
     let backend = cuda_backend::Backend::new()?;
@@ -403,28 +404,39 @@ fn generate_on_gpu(
     let max_new_tokens = prompts.max_new_tokens;
     let mut results = Vec::new();
 
-    let eos_ids = vec![artifacts.config.eos_token_id];
+    let mut run = |prompt: &str, prompt_ids: &[u32], eos_ids: Vec<u32>, expected: &[u32]| {
+        let cached = generate(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
+        let uncached = generate_uncached(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
+        if cached != uncached {
+            return Err(ModelError::CacheMismatch {
+                prompt: prompt.to_owned(),
+                cached,
+                uncached,
+            });
+        }
+        results.push(expect_tokens(prompt, &eos_ids, cached, expected)?);
+        Ok(())
+    };
+
+    let eos_id = artifacts.config.eos_token_id;
     for case in &prompts.cases {
-        let token_ids = generate(&backend, &model, &case.token_ids, max_new_tokens, &eos_ids)?;
-        results.push(expect_tokens(
+        run(
             &case.prompt,
-            &eos_ids,
-            token_ids,
+            &case.token_ids,
+            vec![eos_id],
             &case.expected_token_ids,
-        )?);
+        )?;
     }
 
     // the base model rarely ends a short completion, so a token it is known
     // to generate stands in for the end-of-sequence token
     let case = &prompts.cases[0];
-    let eos_ids = vec![case.expected_token_ids[1]];
-    let token_ids = generate(&backend, &model, &case.token_ids, max_new_tokens, &eos_ids)?;
-    results.push(expect_tokens(
+    run(
         &case.prompt,
-        &eos_ids,
-        token_ids,
+        &case.token_ids,
+        vec![case.expected_token_ids[1]],
         &case.expected_token_ids[..2],
-    )?);
+    )?;
 
     Ok(results)
 }

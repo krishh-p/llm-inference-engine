@@ -48,7 +48,7 @@ pub(crate) fn is_finished(generated: &[u32], max_new_tokens: usize, eos_ids: &[u
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) use gpu::generate;
+pub(crate) use gpu::{generate, generate_uncached};
 
 #[cfg(feature = "cuda")]
 mod gpu {
@@ -82,6 +82,33 @@ mod gpu {
                 return Ok(generated);
             }
             (logits, caches) = model.forward(&[token_id], &caches, &mut Trace::off())?;
+        }
+    }
+
+    /// Greedily generates like [`generate`], but runs the whole sequence again
+    /// for every new token instead of keeping caches.
+    ///
+    /// This repeats almost all of the work at every step, so it is only used
+    /// to check that the cached path picks the same tokens.
+    pub(crate) fn generate_uncached(
+        backend: &Backend,
+        model: &Model,
+        prompt_ids: &[u32],
+        max_new_tokens: usize,
+        eos_ids: &[u32],
+    ) -> Result<Vec<u32>> {
+        check_request(prompt_ids.len(), max_new_tokens, model.max_positions())?;
+
+        let mut sequence = prompt_ids.to_vec();
+        let mut generated = Vec::with_capacity(max_new_tokens);
+        loop {
+            let (logits, _) = model.forward(&sequence, &[], &mut Trace::off())?;
+            let token_id = argmax(&backend.download(&logits)?);
+            generated.push(token_id);
+            if is_finished(&generated, max_new_tokens, eos_ids) {
+                return Ok(generated);
+            }
+            sequence.push(token_id);
         }
     }
 }

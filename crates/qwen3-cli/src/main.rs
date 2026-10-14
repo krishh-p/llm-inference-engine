@@ -197,7 +197,10 @@ fn verify(model_dir: &Path, fixture_dir: &Path, prompts_path: &Path) -> Result<(
             artifacts.tokenizer.decode(&result.token_ids)?
         );
     }
-    println!("generation checks passed: {}", results.len());
+    println!(
+        "generation checks passed, with and without caches: {}",
+        results.len()
+    );
     Ok(())
 }
 

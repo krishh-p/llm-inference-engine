@@ -80,6 +80,13 @@ pub enum ModelError {
         actual: Vec<u32>,
     },
 
+    #[error("prompt {prompt:?} generated {cached:?} with caches but {uncached:?} without")]
+    CacheMismatch {
+        prompt: String,
+        cached: Vec<u32>,
+        uncached: Vec<u32>,
+    },
+
     #[error("fixture manifest field {0} is empty")]
     EmptyManifestField(&'static str),
 
