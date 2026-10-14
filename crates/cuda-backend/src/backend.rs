@@ -1,14 +1,15 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cuda_core::{Device, Stream};
+use cuda_core::{Device, Event, Stream};
 use cuda_kernels::{
-    add_f32, add_rms_norm_f32, causal_softmax_f32, rms_norm_f32, rope_f32, silu_mul_f32,
-    swap_leading_axes_f32,
+    add_f32, add_rms_norm_f32, causal_softmax_f32, merge_heads_f32, rms_norm_f32,
+    rms_norm_heads_f32, rope_f32, silu_mul_f32, split_heads_f32,
 };
 use cutile::prelude::*;
 
 use crate::cublas::CublasHandle;
-use crate::matmul::{check_device, plan_gemm, plan_head_gemm};
+use crate::matmul::{HeadGemm, check_device, plan_attention_mix, plan_attention_scores, plan_gemm};
 use crate::rms_norm::inverse_hidden_size;
 use crate::shapes::{check_row_range, dims, expect_shape};
 use crate::{BackendError, check_rms_norm_shape};
@@ -21,6 +22,10 @@ pub struct Backend {
     pub(crate) device: Arc<Device>,
     pub(crate) stream: Arc<Stream>,
     cublas: CublasHandle,
+    /// Recorded on the stream to wait for the work queued so far.
+    finished: Event,
+    /// How many device or host buffers this backend has allocated.
+    allocations: AtomicUsize,
 }
 
 impl Backend {
@@ -33,12 +38,22 @@ impl Backend {
         let device = Device::new(0).map_err(cuda_error)?;
         let stream = device.new_stream().map_err(cuda_error)?;
         let cublas = CublasHandle::new(&stream)?;
+        let finished = device.new_event().map_err(cuda_error)?;
 
         Ok(Self {
             device,
             stream,
             cublas,
+            finished,
+            allocations: AtomicUsize::new(0),
         })
+    }
+
+    /// How many buffers [`Backend::upload`], [`Backend::zeros`] and
+    /// [`Backend::download`] have allocated so far. Comparing two counts shows
+    /// whether the work in between allocated anything.
+    pub fn allocations(&self) -> usize {
+        self.allocations.load(Ordering::Relaxed)
     }
 
     /// Copies row-major float32 values to the device.
@@ -47,6 +62,7 @@ impl Backend {
     ///
     /// Returns an error when `values` does not fill `shape` or the copy fails.
     pub fn upload(&self, values: &[f32], shape: &[usize]) -> Result<Tensor<f32>, BackendError> {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
         api::copy_host_vec_to_device(&Arc::new(values.to_vec()))
             .sync_on(&self.stream)
             .map_err(cutile_error)?
@@ -60,6 +76,7 @@ impl Backend {
     ///
     /// Returns an error when the allocation fails.
     pub fn zeros(&self, shape: &[usize]) -> Result<Tensor<f32>, BackendError> {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
         api::zeros::<f32>(shape)
             .sync_on(&self.stream)
             .map_err(cutile_error)
@@ -71,11 +88,51 @@ impl Backend {
     ///
     /// Returns an error when the copy fails.
     pub fn download(&self, tensor: &Tensor<f32>) -> Result<Vec<f32>, BackendError> {
+        self.allocations.fetch_add(1, Ordering::Relaxed);
         // cuTile's host copy takes ownership, so it is given a device copy.
         let copy = tensor.dup().sync_on(&self.stream).map_err(cutile_error)?;
         copy.to_host_vec()
             .sync_on(&self.stream)
             .map_err(cutile_error)
+    }
+
+    /// Copies a tensor into an existing host buffer, in row-major order,
+    /// without allocating anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor is on another device or is not
+    /// contiguous, `host` has a different length, or the copy fails.
+    #[allow(unsafe_code)]
+    pub fn download_into(
+        &self,
+        tensor: &Tensor<f32>,
+        host: &mut [f32],
+    ) -> Result<(), BackendError> {
+        self.check_tensors(&[("tensor", tensor)])?;
+        let elements = tensor.num_bytes() / size_of::<f32>();
+        if host.len() != elements {
+            return Err(BackendError::OutputLength {
+                case: "download_into".to_owned(),
+                expected: elements,
+                actual: host.len(),
+            });
+        }
+
+        self.device.bind_to_thread().map_err(cuda_error)?;
+        // SAFETY: the tensor was checked to be a contiguous float32 buffer on
+        // this device with as many elements as `host` has room for, and both
+        // stay borrowed until the stream has been drained below.
+        unsafe {
+            cuda_core::memcpy_dtoh_async::<f32>(
+                host.as_mut_ptr(),
+                device_pointer(tensor, 0),
+                elements,
+                &self.stream,
+            )
+            .map_err(cuda_error)?;
+        }
+        self.wait_for_stream()
     }
 
     /// Copies `rows` rows of one matrix into another of the same width, so
@@ -149,45 +206,53 @@ impl Backend {
         self.gemm(output, left, right, true)
     }
 
-    /// Computes `output[h] = left[h] @ right[h / group]` for every head `h`.
+    /// Computes the scaled attention scores of every query head,
+    /// `scores[h, :, :keys] = scale * q[h] @ k[h / group, :keys]^T`.
     ///
-    /// The tensors are `[heads, rows, cols]`. When `right` has fewer heads,
-    /// each one is shared by `group` consecutive left heads, which is how
-    /// grouped-query attention pairs query heads with key and value heads.
-    /// Only the first `right_rows` rows of each right head are used, so
-    /// `right` can be a KV cache with room for more tokens than it holds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device or is not
-    /// contiguous, the shapes do not agree, or cuBLAS fails.
-    pub fn matmul_heads(
-        &self,
-        output: &mut Tensor<f32>,
-        left: &Tensor<f32>,
-        right: &Tensor<f32>,
-        right_rows: usize,
-    ) -> Result<(), BackendError> {
-        self.head_gemm(output, left, right, false, right_rows, 1.0)
-    }
-
-    /// Computes `output[h] = scale * left[h] @ right[h / group]^T` for every
-    /// head `h`. See [`Backend::matmul_heads`] for how heads are paired and
-    /// which rows of `right` are used.
+    /// `q` is `[heads, rows, head_dim]` and `k` is a key cache
+    /// `[kv_heads, capacity, head_dim]` holding `keys` tokens. Each key head is
+    /// shared by `group` consecutive query heads, which is how grouped-query
+    /// attention pairs them. `scores` is `[heads, rows, capacity]`, and only
+    /// its first `keys` columns are written.
     ///
     /// # Errors
     ///
     /// Returns an error when a tensor is on another device or is not
     /// contiguous, the shapes do not agree, or cuBLAS fails.
-    pub fn matmul_heads_transposed(
+    pub fn attention_scores(
         &self,
-        output: &mut Tensor<f32>,
-        left: &Tensor<f32>,
-        right: &Tensor<f32>,
-        right_rows: usize,
+        scores: &mut Tensor<f32>,
+        q: &Tensor<f32>,
+        k: &Tensor<f32>,
+        keys: usize,
         scale: f32,
     ) -> Result<(), BackendError> {
-        self.head_gemm(output, left, right, true, right_rows, scale)
+        self.check_tensors(&[("q", q), ("k", k), ("scores", &*scores)])?;
+        let plan = plan_attention_scores(q.shape(), k.shape(), scores.shape(), keys)?;
+        self.head_gemm(&plan, scale, q, k, scores)
+    }
+
+    /// Mixes the cached values by the attention probabilities of every query
+    /// head, `output[h] = probs[h, :, :keys] @ v[h / group, :keys]`.
+    ///
+    /// `probs` is `[heads, rows, capacity]`, `v` is a value cache
+    /// `[kv_heads, capacity, head_dim]` holding `keys` tokens, and `output` is
+    /// `[heads, rows, head_dim]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device or is not
+    /// contiguous, the shapes do not agree, or cuBLAS fails.
+    pub fn attention_mix(
+        &self,
+        output: &mut Tensor<f32>,
+        probs: &Tensor<f32>,
+        v: &Tensor<f32>,
+        keys: usize,
+    ) -> Result<(), BackendError> {
+        self.check_tensors(&[("probs", probs), ("v", v), ("output", &*output)])?;
+        let plan = plan_attention_mix(probs.shape(), v.shape(), output.shape(), keys)?;
+        self.head_gemm(&plan, 1.0, probs, v, output)
     }
 
     /// Computes `output = left + right` for matrices of the same shape.
@@ -263,6 +328,43 @@ impl Backend {
             input,
             weight,
             inverse_hidden_size(hidden_size),
+            epsilon,
+        )
+        .sync_on(&self.stream)
+        .map_err(cutile_error)?;
+        Ok(())
+    }
+
+    /// Normalizes every head's vector in a `[heads, rows, head_dim]` tensor
+    /// and scales it by `weight`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device, a shape is wrong
+    /// or unsupported, or the kernel fails.
+    pub fn rms_norm_heads(
+        &self,
+        output: &mut Tensor<f32>,
+        input: &Tensor<f32>,
+        weight: &Tensor<f32>,
+        epsilon: f32,
+    ) -> Result<(), BackendError> {
+        let [heads, rows, head_dim] = dims("rms_norm_heads", "input", input.shape())?;
+        check_rms_norm_shape(heads * rows, head_dim)?;
+        expect_shape(
+            "rms_norm_heads",
+            "output",
+            output.shape(),
+            &[heads, rows, head_dim],
+        )?;
+        expect_shape("rms_norm_heads", "weight", weight.shape(), &[head_dim])?;
+        self.check_tensors(&[("input", input), ("weight", weight), ("output", &*output)])?;
+
+        let _ = rms_norm_heads_f32(
+            output.partition([1, 1, head_dim.next_power_of_two()]),
+            input,
+            weight,
+            inverse_hidden_size(head_dim),
             epsilon,
         )
         .sync_on(&self.stream)
@@ -357,29 +459,54 @@ impl Backend {
         Ok(())
     }
 
-    /// Copies `input[b, a, :]` to `output[a, b, :]`.
-    ///
-    /// This turns `[rows, heads, head_dim]` into `[heads, rows, head_dim]` and back.
+    /// Splits `[rows, heads * head_dim]` into `[heads, rows, head_dim]`, so
+    /// each head's vectors sit together.
     ///
     /// # Errors
     ///
     /// Returns an error when a tensor is on another device, the shapes do not
     /// agree, or the kernel fails.
-    pub fn swap_leading_axes(
+    pub fn split_heads(
         &self,
         output: &mut Tensor<f32>,
         input: &Tensor<f32>,
     ) -> Result<(), BackendError> {
-        let [first, second, width] = dims("swap_leading_axes", "input", input.shape())?;
+        let [heads, rows, head_dim] = dims("split_heads", "output", output.shape())?;
         expect_shape(
-            "swap_leading_axes",
-            "output",
-            output.shape(),
-            &[second, first, width],
+            "split_heads",
+            "input",
+            input.shape(),
+            &[rows, heads * head_dim],
         )?;
         self.check_tensors(&[("input", input), ("output", &*output)])?;
 
-        let _ = swap_leading_axes_f32(output.partition([1, 1, width]), input)
+        let _ = split_heads_f32(output.partition([1, 1, head_dim]), input)
+            .sync_on(&self.stream)
+            .map_err(cutile_error)?;
+        Ok(())
+    }
+
+    /// Merges `[heads, rows, head_dim]` back into `[rows, heads * head_dim]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device, the shapes do not
+    /// agree, or the kernel fails.
+    pub fn merge_heads(
+        &self,
+        output: &mut Tensor<f32>,
+        input: &Tensor<f32>,
+    ) -> Result<(), BackendError> {
+        let [heads, rows, head_dim] = dims("merge_heads", "input", input.shape())?;
+        expect_shape(
+            "merge_heads",
+            "output",
+            output.shape(),
+            &[rows, heads * head_dim],
+        )?;
+        self.check_tensors(&[("input", input), ("output", &*output)])?;
+
+        let _ = merge_heads_f32(output.partition([1, head_dim]), input)
             .sync_on(&self.stream)
             .map_err(cutile_error)?;
         Ok(())
@@ -444,6 +571,8 @@ impl Backend {
     ///
     /// Row `r` belongs to the token at `first_position + r` and column `c` to
     /// the token at position `c`. A token sees itself and earlier tokens only.
+    /// Scores may be wider than the tokens they hold, as when they are sized
+    /// for a whole KV cache, and every column past a row's token comes out 0.
     ///
     /// # Errors
     ///
@@ -456,13 +585,15 @@ impl Backend {
         first_position: usize,
     ) -> Result<(), BackendError> {
         let [heads, rows, cols] = dims("causal_softmax", "scores", scores.shape())?;
-        // the last row is the newest token, so it must see every column
-        expect_shape(
-            "causal_softmax",
-            "scores",
-            scores.shape(),
-            &[heads, rows, first_position + rows],
-        )?;
+        // the last row is the newest token, so there must be a column for it
+        if cols < first_position + rows {
+            return Err(BackendError::Shape {
+                operation: "causal_softmax",
+                name: "scores",
+                expected: vec![heads, rows, first_position + rows],
+                actual: scores.shape().to_vec(),
+            });
+        }
         expect_shape(
             "causal_softmax",
             "output",
@@ -470,11 +601,15 @@ impl Backend {
             &[heads, rows, cols],
         )?;
         self.check_tensors(&[("scores", scores), ("output", &*output)])?;
-        // the shape check above showed this difference is `first_position`
-        let first_position = scores.shape()[2] - scores.shape()[1];
+        let first_position = i32::try_from(first_position).map_err(|_| BackendError::Shape {
+            operation: "causal_softmax",
+            name: "scores",
+            expected: vec![heads, rows, first_position + rows],
+            actual: scores.shape().to_vec(),
+        })?;
 
-        // Columns past the real width are padding. They sit after the newest
-        // token, so the causal mask hides them too.
+        // Columns past the newest token, whether unused cache columns or
+        // padding up to the tile width, are hidden by the causal mask.
         let _ = causal_softmax_f32(
             output.partition([1, 1, cols.next_power_of_two()]),
             scores,
@@ -517,32 +652,24 @@ impl Backend {
         self.wait_for_stream()
     }
 
+    /// Runs one planned GEMM per head: `output[h] = scale * left[h] @ right[h / group]`,
+    /// with `right` transposed when the plan says so.
     #[allow(unsafe_code)]
     fn head_gemm(
         &self,
-        output: &mut Tensor<f32>,
+        plan: &HeadGemm,
+        scale: f32,
         left: &Tensor<f32>,
         right: &Tensor<f32>,
-        right_transposed: bool,
-        right_rows: usize,
-        scale: f32,
+        output: &mut Tensor<f32>,
     ) -> Result<(), BackendError> {
-        self.check_tensors(&[("left", left), ("right", right), ("output", &*output)])?;
-        let plan = plan_head_gemm(
-            left.shape(),
-            right.shape(),
-            output.shape(),
-            right_transposed,
-            right_rows,
-        )?;
-
         for head in 0..plan.heads {
             let left_offset = head * plan.left_elements * size_of::<f32>();
             let right_offset = (head / plan.group) * plan.right_elements * size_of::<f32>();
             let output_offset = head * plan.output_elements * size_of::<f32>();
 
-            // SAFETY: the three tensors were checked to be contiguous float32
-            // buffers on this device, plan_head_gemm checked that every head
+            // SAFETY: the caller checked that the three tensors are contiguous
+            // float32 buffers on this device, the plan checked that every head
             // lies inside its tensor, and the tensors stay borrowed until the
             // stream has been drained below.
             unsafe {
@@ -572,9 +699,8 @@ impl Backend {
 
     /// Blocks until the stream has finished everything queued on it.
     fn wait_for_stream(&self) -> Result<(), BackendError> {
-        let finished = self.device.new_event().map_err(cuda_error)?;
-        finished.record(&self.stream).map_err(cuda_error)?;
-        finished.synchronize().map_err(cuda_error)
+        self.finished.record(&self.stream).map_err(cuda_error)?;
+        self.finished.synchronize().map_err(cuda_error)
     }
 }
 

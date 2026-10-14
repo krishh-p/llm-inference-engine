@@ -94,6 +94,12 @@ pub enum ModelError {
         capacity: usize,
     },
 
+    #[error("prefill needs empty KV caches, but one holds {len} tokens")]
+    CacheNotEmpty { len: usize },
+
+    #[error("workspace is sized for {expected} new tokens, but the pass has {actual}")]
+    WorkspaceRows { expected: usize, actual: usize },
+
     #[error("check failed: {0}")]
     CheckFailed(String),
 

@@ -18,6 +18,8 @@ mod mlp;
 mod model;
 #[cfg(feature = "cuda")]
 mod trace;
+#[cfg(feature = "cuda")]
+mod workspace;
 
 pub use artifacts::{ModelSummary, Qwen3Artifacts};
 pub use config::Qwen3Config;

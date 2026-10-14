@@ -183,6 +183,14 @@ a row no token has written shows up as a failure instead of quietly reading
 zeros. They also check that a write past the end of a cache is refused before
 any layer changes.
 
+Prefill and decode each run on their own workspace, which holds every tensor a
+forward pass writes. Prefill's is sized for the prompt and used once. Decode's
+is sized for one token and reused for every step, so the token loop allocates
+nothing. The attention scores are as wide as the cache and each step uses the
+columns for the tokens it holds, the same way it reads the cache. The backend
+counts the buffers it allocates, and the checks require that count to stay the
+same across every decode step.
+
 ```bash
 make rust-verify
 ```

@@ -4,6 +4,7 @@ use crate::block::Block;
 use crate::kv_cache::KvCache;
 use crate::trace::Trace;
 use crate::weights::{LayerWeights, load_tensor};
+use crate::workspace::Workspace;
 use crate::{ModelError, Qwen3Artifacts, Qwen3Config, Result};
 
 /// The whole model, with all of its weights on the GPU.
@@ -63,54 +64,41 @@ impl<'a> Model<'a> {
             .collect()
     }
 
-    /// Runs new tokens through the model and predicts the next token.
+    /// Allocates a workspace for passes of `rows` new tokens against caches
+    /// with room for `capacity` tokens.
+    pub(crate) fn new_workspace(&self, rows: usize, capacity: usize) -> Result<Workspace> {
+        Workspace::new(self.backend, &self.config, rows, capacity)
+    }
+
+    /// Runs the whole prompt at once and fills the empty `caches` with it.
     ///
-    /// `caches` has one cache per layer, holding the tokens so far. They are
-    /// empty for prefill, and the new tokens are added to every one. The
-    /// result is `[1, vocab_size]` logits.
-    ///
-    /// The trace gets `embedding`, each layer's output as `layer_{i}_output`,
-    /// then `final_norm` and `logits`.
-    pub(crate) fn forward(
+    /// The workspace must be sized for the prompt. The result is the logits
+    /// that predict the first new token.
+    pub(crate) fn prefill<'w>(
         &self,
-        token_ids: &[u32],
+        prompt_ids: &[u32],
         caches: &mut [KvCache],
+        workspace: &'w mut Workspace,
         trace: &mut Trace,
-    ) -> Result<Tensor<f32>> {
-        let backend = self.backend;
-        let hidden_size = self.config.hidden_size;
-        let rows = token_ids.len();
-        self.config.check_token_ids(token_ids)?;
-        self.config.check_cache_count(caches.len())?;
-        // checked up front so a full cache fails before any layer has changed
-        for cache in caches.iter() {
-            cache.check_room(rows)?;
+    ) -> Result<&'w [f32]> {
+        if let Some(cache) = caches.iter().find(|cache| cache.len > 0) {
+            return Err(ModelError::CacheNotEmpty { len: cache.len });
         }
+        self.forward(prompt_ids, caches, workspace, trace)
+    }
 
-        let mut x = self.embed(token_ids)?;
-        trace.save(backend, "embedding", &x)?;
-
-        for (layer, (block, cache)) in self.blocks.iter().zip(caches.iter_mut()).enumerate() {
-            x = block.forward(&x, rows, cache, &mut Trace::off())?;
-            trace.save(backend, format!("layer_{layer}_output"), &x)?;
-        }
-
-        // only the last row predicts the next token
-        let mut last = backend.zeros(&[1, hidden_size])?;
-        backend.copy_rows(&mut last, 0, &x, rows - 1, 1)?;
-        let mut normalized = backend.zeros(&[1, hidden_size])?;
-        backend.rms_norm(
-            &mut normalized,
-            &last,
-            &self.final_norm,
-            self.config.rms_norm_eps,
-        )?;
-        trace.save(backend, "final_norm", &normalized)?;
-
-        let mut logits = backend.zeros(&[1, self.config.vocab_size])?;
-        backend.matmul_transposed(&mut logits, &normalized, &self.embed_tokens)?;
-        trace.save(backend, "logits", &logits)?;
-        Ok(logits)
+    /// Runs one new token against everything in `caches` and adds it to them.
+    ///
+    /// The workspace must be sized for one token, and the same one is reused
+    /// for every step. The result is the logits that predict the next token.
+    pub(crate) fn decode_step<'w>(
+        &self,
+        token_id: u32,
+        caches: &mut [KvCache],
+        workspace: &'w mut Workspace,
+        trace: &mut Trace,
+    ) -> Result<&'w [f32]> {
+        self.forward(&[token_id], caches, workspace, trace)
     }
 
     /// How many positions the model can attend over.
@@ -118,16 +106,60 @@ impl<'a> Model<'a> {
         self.config.max_position_embeddings
     }
 
-    /// Looks up each token's row of the embedding table, `[tokens, hidden_size]`.
-    fn embed(&self, token_ids: &[u32]) -> Result<Tensor<f32>> {
-        let mut x = self
-            .backend
-            .zeros(&[token_ids.len(), self.config.hidden_size])?;
+    /// Runs new tokens through every layer and copies the logits that
+    /// predict the next token to the host.
+    ///
+    /// The trace gets `embedding`, each layer's output as `layer_{i}_output`,
+    /// then `final_norm` and `logits`.
+    fn forward<'w>(
+        &self,
+        token_ids: &[u32],
+        caches: &mut [KvCache],
+        workspace: &'w mut Workspace,
+        trace: &mut Trace,
+    ) -> Result<&'w [f32]> {
+        let backend = self.backend;
+        let rows = token_ids.len();
+        self.config.check_token_ids(token_ids)?;
+        self.config.check_cache_count(caches.len())?;
+        workspace.check_rows(rows)?;
+        // checked up front so a full cache fails before any layer has changed
+        for cache in caches.iter() {
+            cache.check_room(rows)?;
+        }
+
+        self.embed(token_ids, &mut workspace.x)?;
+        trace.save(backend, "embedding", &workspace.x)?;
+
+        for (layer, (block, cache)) in self.blocks.iter().zip(caches.iter_mut()).enumerate() {
+            block.forward(workspace, cache, &mut Trace::off())?;
+            trace.save_layer_output(backend, layer, &workspace.x)?;
+        }
+
+        // only the last row predicts the next token
+        let ws = workspace;
+        backend.copy_rows(&mut ws.last, 0, &ws.x, rows - 1, 1)?;
+        backend.rms_norm(
+            &mut ws.final_norm,
+            &ws.last,
+            &self.final_norm,
+            self.config.rms_norm_eps,
+        )?;
+        trace.save(backend, "final_norm", &ws.final_norm)?;
+
+        backend.matmul_transposed(&mut ws.logits, &ws.final_norm, &self.embed_tokens)?;
+        trace.save(backend, "logits", &ws.logits)?;
+        backend.download_into(&ws.logits, &mut ws.host_logits)?;
+        Ok(&ws.host_logits)
+    }
+
+    /// Copies each token's row of the embedding table into `x`, `[tokens, hidden_size]`.
+    fn embed(&self, token_ids: &[u32], x: &mut Tensor<f32>) -> Result<()> {
         for (row, &token_id) in token_ids.iter().enumerate() {
             let token_id = usize::try_from(token_id).expect("token IDs fit in usize");
             self.backend
-                .copy_rows(&mut x, row, &self.embed_tokens, token_id, 1)?;
+                .copy_rows(x, row, &self.embed_tokens, token_id, 1)?;
         }
-        Ok(x)
+        Ok(())
     }
 }

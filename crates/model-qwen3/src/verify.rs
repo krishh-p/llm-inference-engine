@@ -192,12 +192,14 @@ pub fn verify_model(
 /// One more run of the first prompt treats its second expected token as the
 /// end-of-sequence token, and checks that generation stops right after it.
 /// Every run is repeated without caches, and both must pick the same tokens.
+/// The decode steps of every cached run must not allocate any buffers.
 ///
 /// # Errors
 ///
 /// Returns an error when a weight cannot be loaded, the GPU is unavailable,
 /// there is no first prompt with at least two expected tokens, any run
-/// generates different tokens, or the cached and uncached runs disagree.
+/// generates different tokens, the cached and uncached runs disagree, or a
+/// decode step allocates.
 pub fn verify_generation(
     artifacts: &Qwen3Artifacts,
     prompts: &RegressionPromptSet,
@@ -252,6 +254,7 @@ fn run_on_gpu(
     use crate::block::Block;
     use crate::kv_cache::KvCache;
     use crate::trace::Trace;
+    use crate::workspace::Workspace;
 
     let backend = cuda_backend::Backend::new()?;
     let block = Block::new(&backend, config, weights)?;
@@ -260,14 +263,16 @@ fn run_on_gpu(
     let mut results = Vec::new();
 
     let mut trace = Trace::recording();
-    let x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
-    block.forward(&x, prefill.rows, &mut cache, &mut trace)?;
+    let mut workspace = Workspace::new(&backend, config, prefill.rows, capacity)?;
+    workspace.x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
+    block.forward(&mut workspace, &mut cache, &mut trace)?;
     compare(prefill, &trace, &mut results)?;
 
     // decode attends to the cache that prefill just filled
     let mut trace = Trace::recording();
-    let x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
-    block.forward(&x, decode.rows, &mut cache, &mut trace)?;
+    let mut workspace = Workspace::new(&backend, config, decode.rows, capacity)?;
+    workspace.x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
+    block.forward(&mut workspace, &mut cache, &mut trace)?;
     compare(decode, &trace, &mut results)?;
 
     Ok(results)
@@ -327,7 +332,8 @@ fn run_model_on_gpu(
         .collect::<Result<Vec<_>>>()?;
 
     let mut trace = Trace::recording();
-    model.forward(&fixture.token_ids, &mut caches, &mut trace)?;
+    let mut workspace = model.new_workspace(rows, capacity)?;
+    model.prefill(&fixture.token_ids, &mut caches, &mut workspace, &mut trace)?;
 
     let mut results = Vec::new();
     // widening bfloat16 to float32 is exact, so the rows must match exactly
@@ -370,28 +376,54 @@ fn run_model_on_gpu(
     )?;
 
     // decode attends to the caches that prefill just filled in every layer
-    let logits = model.forward(&[fixture.decode_token_id], &mut caches, &mut Trace::off())?;
+    let mut workspace = model.new_workspace(1, capacity)?;
+    let logits = model.decode_step(
+        fixture.decode_token_id,
+        &mut caches,
+        &mut workspace,
+        &mut Trace::off(),
+    )?;
     check(
         &mut results,
         "decode_logits".to_owned(),
-        &backend.download(&logits)?,
+        logits,
         &fixture.decode_logits,
         fixture.logits_tolerance,
     )?;
 
-    // one token more than the caches have room for must be refused before
+    // more decode steps fill the spare rows, reusing the same workspace
+    let allocations_before = backend.allocations();
+    for _ in 0..SPARE_CACHE_ROWS {
+        model.decode_step(
+            fixture.decode_token_id,
+            &mut caches,
+            &mut workspace,
+            &mut Trace::off(),
+        )?;
+    }
+    if backend.allocations() != allocations_before {
+        return Err(ModelError::CheckFailed(
+            "a decode step allocated a buffer".to_owned(),
+        ));
+    }
+
+    // one more token than the caches have room for must be refused before
     // any layer has changed
-    let too_many = vec![fixture.decode_token_id; SPARE_CACHE_ROWS + 1];
-    match model.forward(&too_many, &mut caches, &mut Trace::off()) {
+    match model.decode_step(
+        fixture.decode_token_id,
+        &mut caches,
+        &mut workspace,
+        &mut Trace::off(),
+    ) {
         Err(ModelError::CacheFull { .. }) => {}
         Err(error) => return Err(error),
         Ok(_) => {
             return Err(ModelError::CheckFailed(
-                "a full KV cache accepted more tokens".to_owned(),
+                "a full KV cache accepted another token".to_owned(),
             ));
         }
     }
-    if caches.iter().any(|cache| cache.len != rows + 1) {
+    if caches.iter().any(|cache| cache.len != capacity) {
         return Err(ModelError::CheckFailed(
             "a refused write still changed a KV cache".to_owned(),
         ));
@@ -438,8 +470,15 @@ fn generate_on_gpu(
     let mut results = Vec::new();
 
     let mut run = |prompt: &str, prompt_ids: &[u32], eos_ids: Vec<u32>, expected: &[u32]| {
-        let cached = generate(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
-        let uncached = generate_uncached(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
+        let generated = generate(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
+        if generated.decode_allocations > 0 {
+            return Err(ModelError::CheckFailed(format!(
+                "decoding {prompt:?} allocated {} buffers",
+                generated.decode_allocations
+            )));
+        }
+        let cached = generated.token_ids;
+        let uncached = generate_uncached(&model, prompt_ids, max_new_tokens, &eos_ids)?;
         if cached != uncached {
             return Err(ModelError::CacheMismatch {
                 prompt: prompt.to_owned(),

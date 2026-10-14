@@ -85,61 +85,171 @@ pub(crate) struct HeadGemm {
     pub output_elements: usize,
 }
 
-/// Plans `output[h] = left[h] @ right[h / group]` for every head `h`, with the
-/// right matrices optionally transposed.
+/// The shapes of one attention matmul, read from its three tensors.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+struct AttentionShapes {
+    heads: i32,
+    kv_heads: i32,
+    rows: i32,
+    head_dim: i32,
+    capacity: i32,
+    keys: i32,
+}
+
+/// Plans the attention scores of every query head:
+/// `scores[h, :, :keys] = q[h] @ k[h / group, :keys]^T`.
 ///
-/// Only the first `right_rows` rows of each right head are used, and the rest
-/// are skipped. A KV cache keeps room for more tokens than it holds, so this
-/// lets attention read just the filled rows.
+/// `q` is `[heads, rows, head_dim]`, `k` is a key cache
+/// `[kv_heads, capacity, head_dim]`, and `scores` is `[heads, rows, capacity]`.
+/// Only the first `keys` cached keys are read, and only the first `keys`
+/// columns of each row of scores are written.
 ///
 /// # Errors
 ///
-/// Returns an error when a shape is not three-dimensional, the left heads are
-/// not a multiple of the right heads, `right_rows` is zero or more than the
-/// right heads have, or the matrices in each head do not agree.
+/// Returns an error when the shapes do not agree or `keys` is zero or more
+/// than the cache holds.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-pub(crate) fn plan_head_gemm(
-    left: &[i32],
-    right: &[i32],
-    output: &[i32],
-    right_transposed: bool,
-    right_rows: usize,
+pub(crate) fn plan_attention_scores(
+    q: &[i32],
+    k: &[i32],
+    scores: &[i32],
+    keys: usize,
 ) -> Result<HeadGemm, BackendError> {
+    let shapes = attention_shapes(q, k, scores, true, keys)?;
+    let AttentionShapes {
+        rows,
+        head_dim,
+        capacity,
+        keys,
+        ..
+    } = shapes;
+
+    // cuBLAS's A is the keys, read transposed, and its B is the queries.
+    // A row of scores is `capacity` wide, of which the first `keys` are written.
+    let call = GemmCall {
+        transpose_a: true,
+        m: keys,
+        n: rows,
+        k: head_dim,
+        lda: head_dim,
+        ldb: head_dim,
+        ldc: capacity,
+    };
+    Ok(head_gemm(
+        &shapes,
+        call,
+        [rows * head_dim, capacity * head_dim, rows * capacity],
+    ))
+}
+
+/// Plans the attention output of every query head:
+/// `output[h] = probs[h, :, :keys] @ v[h / group, :keys]`.
+///
+/// `probs` is `[heads, rows, capacity]`, `v` is a value cache
+/// `[kv_heads, capacity, head_dim]`, and `output` is `[heads, rows, head_dim]`.
+/// Only the first `keys` columns of probabilities and cached values are read.
+///
+/// # Errors
+///
+/// Returns an error when the shapes do not agree or `keys` is zero or more
+/// than the cache holds.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) fn plan_attention_mix(
+    probs: &[i32],
+    v: &[i32],
+    output: &[i32],
+    keys: usize,
+) -> Result<HeadGemm, BackendError> {
+    let shapes = attention_shapes(output, v, probs, false, keys)?;
+    let AttentionShapes {
+        rows,
+        head_dim,
+        capacity,
+        keys,
+        ..
+    } = shapes;
+
+    // cuBLAS's A is the values and its B is the probabilities, whose rows
+    // are `capacity` wide although only the first `keys` are read.
+    let call = GemmCall {
+        transpose_a: false,
+        m: head_dim,
+        n: rows,
+        k: keys,
+        lda: head_dim,
+        ldb: capacity,
+        ldc: head_dim,
+    };
+    Ok(head_gemm(
+        &shapes,
+        call,
+        [rows * capacity, capacity * head_dim, rows * head_dim],
+    ))
+}
+
+/// Checks the three tensors of an attention matmul against each other.
+///
+/// `per_head` is `[heads, rows, head_dim]`, `cache` is
+/// `[kv_heads, capacity, head_dim]`, and `wide` is `[heads, rows, capacity]`.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn attention_shapes(
+    per_head: &[i32],
+    cache: &[i32],
+    wide: &[i32],
+    right_transposed: bool,
+    keys: usize,
+) -> Result<AttentionShapes, BackendError> {
     let mismatch = || BackendError::MatmulShape {
-        left: left.to_vec(),
-        right: right.to_vec(),
-        output: output.to_vec(),
+        left: per_head.to_vec(),
+        right: cache.to_vec(),
+        output: wide.to_vec(),
         right_transposed,
     };
 
-    let (&[heads, ..], &[right_heads, ..], &[output_heads, ..]) = (left, right, output) else {
+    let (
+        &[heads, rows, head_dim],
+        &[kv_heads, capacity, cache_dim],
+        &[wide_heads, wide_rows, width],
+    ) = (per_head, cache, wide)
+    else {
         return Err(mismatch());
     };
-    if left.len() != 3 || right.len() != 3 || output.len() != 3 {
+    let keys = i32::try_from(keys).map_err(|_| mismatch())?;
+    let agree = [heads, rows, head_dim, kv_heads, capacity]
+        .iter()
+        .all(|&dim| dim > 0)
+        && heads % kv_heads == 0
+        && cache_dim == head_dim
+        && [wide_heads, wide_rows, width] == [heads, rows, capacity]
+        && keys > 0
+        && keys <= capacity;
+    if !agree {
         return Err(mismatch());
     }
-    if right_heads <= 0 || heads % right_heads != 0 || output_heads != heads {
-        return Err(mismatch());
-    }
-    let used_rows = i32::try_from(right_rows).map_err(|_| mismatch())?;
-    if used_rows <= 0 || used_rows > right[1] {
-        return Err(mismatch());
-    }
-    let used_right = [used_rows, right[2]];
-    let call = plan_gemm(&left[1..], &used_right, &output[1..], right_transposed)
-        .map_err(|_| mismatch())?;
 
-    let elements = |shape: &[i32]| {
-        usize::try_from(shape[1] * shape[2]).expect("plan_gemm checked the dimensions are positive")
-    };
-    Ok(HeadGemm {
-        call,
-        heads: usize::try_from(heads).expect("checked to be positive"),
-        group: usize::try_from(heads / right_heads).expect("checked to be positive"),
-        left_elements: elements(left),
-        right_elements: elements(right),
-        output_elements: elements(output),
+    Ok(AttentionShapes {
+        heads,
+        kv_heads,
+        rows,
+        head_dim,
+        capacity,
+        keys,
     })
+}
+
+/// Turns an attention plan into one GEMM per head. `elements` is how far
+/// apart the heads of the left, right and output tensors are.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+fn head_gemm(shapes: &AttentionShapes, call: GemmCall, elements: [i32; 3]) -> HeadGemm {
+    let to_usize = |value: i32| usize::try_from(value).expect("checked to be positive");
+    HeadGemm {
+        call,
+        heads: to_usize(shapes.heads),
+        group: to_usize(shapes.heads / shapes.kv_heads),
+        left_elements: to_usize(elements[0]),
+        right_elements: to_usize(elements[1]),
+        output_elements: to_usize(elements[2]),
+    }
 }
 
 /// Checks that a tensor lives on the device the backend runs on.
@@ -265,9 +375,9 @@ mod tests {
     }
 
     #[test]
-    fn plans_attention_scores_with_shared_key_heads() {
+    fn plans_scores_like_a_plain_product_when_the_cache_is_full() {
         // q [16, 5, 128] @ k [8, 5, 128]^T -> [16, 5, 5]
-        let plan = plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[16, 5, 5], true, 5).unwrap();
+        let plan = plan_attention_scores(&[16, 5, 128], &[8, 5, 128], &[16, 5, 5], 5).unwrap();
 
         assert_eq!(
             plan.call,
@@ -281,62 +391,55 @@ mod tests {
     }
 
     #[test]
-    fn rejects_heads_that_do_not_divide_evenly() {
-        assert!(matches!(
-            plan_head_gemm(&[16, 5, 128], &[6, 5, 128], &[16, 5, 5], true, 5),
-            Err(BackendError::MatmulShape { .. })
-        ));
-        assert!(matches!(
-            plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[8, 5, 5], true, 5),
-            Err(BackendError::MatmulShape { .. })
-        ));
-        assert!(matches!(
-            plan_head_gemm(&[5, 128], &[5, 128], &[5, 5], true, 5),
-            Err(BackendError::MatmulShape { .. })
-        ));
-    }
+    fn plans_scores_for_the_filled_part_of_a_cache() {
+        // one query against the first 6 of 12 cached keys
+        let plan = plan_attention_scores(&[16, 1, 128], &[8, 12, 128], &[16, 1, 12], 6).unwrap();
 
-    #[test]
-    fn reads_only_the_filled_rows_of_a_cache() {
-        // q [16, 1, 128] @ the first 6 of 12 rows of k [8, 12, 128], transposed
-        let plan = plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 6], true, 6).unwrap();
-
-        assert_eq!(
-            plan.call,
-            plan_gemm(&[1, 128], &[6, 128], &[1, 6], true).unwrap()
-        );
-        // the next head still starts a whole cache head later
+        assert_eq!(plan.call.m, 6);
+        assert_eq!(plan.call.n, 1);
+        assert_eq!(plan.call.k, 128);
+        // a row of scores is the whole capacity wide
+        assert_eq!(plan.call.ldc, 12);
         assert_eq!(plan.right_elements, 12 * 128);
-        assert_eq!(plan.output_elements, 6);
+        assert_eq!(plan.output_elements, 12);
     }
 
     #[test]
-    fn mixes_values_from_the_filled_rows_of_a_cache() {
-        // probs [16, 1, 6] @ the first 6 of 12 rows of v [8, 12, 128]
-        let plan = plan_head_gemm(&[16, 1, 6], &[8, 12, 128], &[16, 1, 128], false, 6).unwrap();
+    fn plans_the_mix_like_a_plain_product_when_the_cache_is_full() {
+        // probs [16, 5, 5] @ v [8, 5, 128] -> [16, 5, 128]
+        let plan = plan_attention_mix(&[16, 5, 5], &[8, 5, 128], &[16, 5, 128], 5).unwrap();
 
         assert_eq!(
             plan.call,
-            plan_gemm(&[1, 6], &[6, 128], &[1, 128], false).unwrap()
+            plan_gemm(&[5, 5], &[5, 128], &[5, 128], false).unwrap()
         );
+        assert_eq!(plan.left_elements, 25);
+        assert_eq!(plan.right_elements, 640);
+        assert_eq!(plan.output_elements, 640);
+    }
+
+    #[test]
+    fn plans_the_mix_for_the_filled_part_of_a_cache() {
+        let plan = plan_attention_mix(&[16, 1, 12], &[8, 12, 128], &[16, 1, 128], 6).unwrap();
+
+        assert_eq!(plan.call.k, 6);
+        // a row of probabilities is the whole capacity wide
+        assert_eq!(plan.call.ldb, 12);
+        assert_eq!(plan.left_elements, 12);
         assert_eq!(plan.right_elements, 12 * 128);
     }
 
     #[test]
-    fn rejects_more_rows_than_the_cache_has() {
-        assert!(matches!(
-            plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 13], true, 13),
-            Err(BackendError::MatmulShape { .. })
-        ));
-        assert!(matches!(
-            plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 0], true, 0),
-            Err(BackendError::MatmulShape { .. })
-        ));
-        // the output must match the rows that are read, not the whole cache
-        assert!(matches!(
-            plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 12], true, 6),
-            Err(BackendError::MatmulShape { .. })
-        ));
+    fn rejects_attention_shapes_that_do_not_agree() {
+        // more keys than the cache has, or none
+        assert!(plan_attention_scores(&[16, 1, 128], &[8, 12, 128], &[16, 1, 12], 13).is_err());
+        assert!(plan_attention_scores(&[16, 1, 128], &[8, 12, 128], &[16, 1, 12], 0).is_err());
+        // scores must be as wide as the cache
+        assert!(plan_attention_scores(&[16, 1, 128], &[8, 12, 128], &[16, 1, 6], 6).is_err());
+        // query heads must be a multiple of the cached heads
+        assert!(plan_attention_scores(&[16, 1, 128], &[6, 12, 128], &[16, 1, 12], 6).is_err());
+        // the head sizes must match
+        assert!(plan_attention_mix(&[16, 1, 12], &[8, 12, 64], &[16, 1, 128], 6).is_err());
     }
 
     #[test]

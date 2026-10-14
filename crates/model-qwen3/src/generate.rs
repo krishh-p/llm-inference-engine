@@ -59,6 +59,14 @@ mod gpu {
     use crate::model::Model;
     use crate::trace::Trace;
 
+    /// The tokens one greedy generation produced.
+    pub(crate) struct Generated {
+        pub token_ids: Vec<u32>,
+        /// Buffers the backend allocated during the decode steps, which
+        /// should be none, since every step reuses the same workspace.
+        pub decode_allocations: usize,
+    }
+
     /// Greedily generates up to `max_new_tokens` tokens after the prompt.
     ///
     /// The prompt runs once as prefill. After that, each new token runs on
@@ -70,20 +78,39 @@ mod gpu {
         prompt_ids: &[u32],
         max_new_tokens: usize,
         eos_ids: &[u32],
-    ) -> Result<Vec<u32>> {
+    ) -> Result<Generated> {
         check_request(prompt_ids.len(), max_new_tokens, model.max_positions())?;
 
         // the caches are allocated once, with room for the whole sequence
-        let mut caches = model.new_caches(prompt_ids.len() + max_new_tokens)?;
-        let mut logits = model.forward(prompt_ids, &mut caches, &mut Trace::off())?;
+        let capacity = prompt_ids.len() + max_new_tokens;
+        let mut caches = model.new_caches(capacity)?;
+
+        // prefill's workspace is sized for the whole prompt and used once
+        let mut prefill_workspace = model.new_workspace(prompt_ids.len(), capacity)?;
+        let logits = model.prefill(
+            prompt_ids,
+            &mut caches,
+            &mut prefill_workspace,
+            &mut Trace::off(),
+        )?;
+        let mut token_id = argmax(logits);
+        drop(prefill_workspace);
+
+        // decode's is sized for one token and reused for every step
+        let mut workspace = model.new_workspace(1, capacity)?;
         let mut generated = Vec::with_capacity(max_new_tokens);
+        let allocations_before = backend.allocations();
         loop {
-            let token_id = argmax(&backend.download(&logits)?);
             generated.push(token_id);
             if is_finished(&generated, max_new_tokens, eos_ids) {
-                return Ok(generated);
+                return Ok(Generated {
+                    token_ids: generated,
+                    decode_allocations: backend.allocations() - allocations_before,
+                });
             }
-            logits = model.forward(&[token_id], &mut caches, &mut Trace::off())?;
+            let logits =
+                model.decode_step(token_id, &mut caches, &mut workspace, &mut Trace::off())?;
+            token_id = argmax(logits);
         }
     }
 
@@ -93,7 +120,6 @@ mod gpu {
     /// This repeats almost all of the work at every step, so it is only used
     /// to check that the cached path picks the same tokens.
     pub(crate) fn generate_uncached(
-        backend: &Backend,
         model: &Model,
         prompt_ids: &[u32],
         max_new_tokens: usize,
@@ -105,9 +131,12 @@ mod gpu {
         let mut generated = Vec::with_capacity(max_new_tokens);
         loop {
             // fresh caches every time, so nothing carries over between steps
-            let mut caches = model.new_caches(sequence.len())?;
-            let logits = model.forward(&sequence, &mut caches, &mut Trace::off())?;
-            let token_id = argmax(&backend.download(&logits)?);
+            let rows = sequence.len();
+            let mut caches = model.new_caches(rows)?;
+            let mut workspace = model.new_workspace(rows, rows)?;
+            let logits =
+                model.prefill(&sequence, &mut caches, &mut workspace, &mut Trace::off())?;
+            let token_id = argmax(logits);
             generated.push(token_id);
             if is_finished(&generated, max_new_tokens, eos_ids) {
                 return Ok(generated);

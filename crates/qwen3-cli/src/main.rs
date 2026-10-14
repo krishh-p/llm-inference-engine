@@ -198,7 +198,7 @@ fn verify(model_dir: &Path, fixture_dir: &Path, prompts_path: &Path) -> Result<(
         );
     }
     println!(
-        "generation checks passed, with and without caches: {}",
+        "generation checks passed, with and without caches and with no decode allocations: {}",
         results.len()
     );
     Ok(())

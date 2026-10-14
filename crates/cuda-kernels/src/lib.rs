@@ -5,9 +5,9 @@
 pub use kernels::{
     causal_softmax_kernel::causal_softmax_f32,
     elementwise_kernel::{add_f32, silu_mul_f32},
-    rms_norm_kernel::{add_rms_norm_f32, rms_norm_bf16, rms_norm_f32},
+    heads_kernel::{merge_heads_f32, split_heads_f32},
+    rms_norm_kernel::{add_rms_norm_f32, rms_norm_bf16, rms_norm_f32, rms_norm_heads_f32},
     rope_kernel::rope_f32,
-    swap_leading_axes_kernel::swap_leading_axes_f32,
     vector_add_kernel::vector_add,
 };
 
@@ -65,6 +65,31 @@ mod kernels {
 
             let weight: Tile<f32, { [H] }> = load_tile(weight, shape![H], [0]);
             let weight = weight.reshape(shape![1, H]);
+            output.store(x * inverse_rms * weight);
+        }
+
+        /// Normalizes each head's vector in a `[heads, rows, head_dim]` tensor,
+        /// the same as `rms_norm_f32` with every head of every token as a row.
+        #[cutile::entry()]
+        pub fn rms_norm_heads_f32<const H: i32>(
+            output: &mut Tensor<f32, { [1, 1, H] }>,
+            input: &Tensor<f32, { [-1, -1, -1] }>,
+            weight: &Tensor<f32, { [-1] }>,
+            inverse_hidden_size: f32,
+            epsilon: f32,
+        ) {
+            let x: Tile<f32, { [1, 1, H] }> = load_tile_like(input, output);
+            let sum: Tile<f32, { [1, 1] }> = reduce_sum(x * x, 2);
+            let inverse_hidden_size: Tile<f32, { [1, 1] }> =
+                broadcast_scalar(inverse_hidden_size, shape![1, 1]);
+            let epsilon: Tile<f32, { [1, 1] }> = broadcast_scalar(epsilon, shape![1, 1]);
+            let inverse_rms = rsqrt(sum * inverse_hidden_size + epsilon, ftz::Disabled);
+            let inverse_rms = inverse_rms
+                .reshape(shape![1, 1, 1])
+                .broadcast(output.shape());
+
+            let weight: Tile<f32, { [H] }> = load_tile(weight, shape![H], [0]);
+            let weight = weight.reshape(shape![1, 1, H]);
             output.store(x * inverse_rms * weight);
         }
 
@@ -131,20 +156,32 @@ mod kernels {
     }
 
     #[cutile::module]
-    pub mod swap_leading_axes_kernel {
+    pub mod heads_kernel {
         #[allow(clippy::wildcard_imports)]
         use cutile::core::*;
 
-        /// Copies `input[b, a, :]` to `output[a, b, :]`.
+        /// Splits `[rows, heads * D]` into `[heads, rows, D]`. Each tile copies
+        /// one head of one token.
         #[cutile::entry()]
-        pub fn swap_leading_axes_f32<const D: i32>(
+        pub fn split_heads_f32<const D: i32>(
             output: &mut Tensor<f32, { [1, 1, D] }>,
+            input: &Tensor<f32, { [-1, -1] }>,
+        ) {
+            let block: (i32, i32, i32) = get_tile_block_id();
+            let x: Tile<f32, { [1, D] }> = load_tile(input, shape![1, D], [block.1, block.0]);
+            output.store(x.reshape(shape![1, 1, D]));
+        }
+
+        /// Merges `[heads, rows, D]` back into `[rows, heads * D]`.
+        #[cutile::entry()]
+        pub fn merge_heads_f32<const D: i32>(
+            output: &mut Tensor<f32, { [1, D] }>,
             input: &Tensor<f32, { [-1, -1, -1] }>,
         ) {
             let block: (i32, i32, i32) = get_tile_block_id();
             let x: Tile<f32, { [1, 1, D] }> =
                 load_tile(input, shape![1, 1, D], [block.1, block.0, 0i32]);
-            output.store(x);
+            output.store(x.reshape(shape![1, D]));
         }
     }
 
