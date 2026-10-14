@@ -40,9 +40,44 @@ pub(crate) fn expect_shape(
     Ok(())
 }
 
+/// Checks that `rows` rows starting at `first` fit in a matrix of `available` rows.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) fn check_row_range(
+    name: &'static str,
+    first: usize,
+    rows: usize,
+    available: usize,
+) -> Result<(), BackendError> {
+    if rows == 0 || first + rows > available {
+        return Err(BackendError::RowRange {
+            name,
+            first,
+            rows,
+            available,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_the_last_row() {
+        assert!(check_row_range("input", 4, 1, 5).is_ok());
+    }
+
+    #[test]
+    fn rejects_rows_past_the_end() {
+        let error = check_row_range("input", 4, 2, 5).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "copy_rows input rows 4..6 do not fit in 5 rows"
+        );
+        assert!(check_row_range("input", 0, 0, 5).is_err());
+    }
 
     #[test]
     fn reads_dimensions_of_the_expected_rank() {

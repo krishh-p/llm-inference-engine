@@ -68,6 +68,20 @@ pub(crate) struct ExpectedTensor {
     pub tolerance: Tolerance,
 }
 
+/// The tensors recorded for the fixture prompt's pass through the whole model.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) struct ModelFixture {
+    pub rows: usize,
+    /// The prompt's embeddings, `[rows, hidden_size]`.
+    pub input: Vec<f32>,
+    /// The last prompt token after each layer, `[layers, hidden_size]`.
+    pub layer_outputs: Vec<f32>,
+    pub final_norm: Vec<f32>,
+    pub logits: Vec<f32>,
+    pub layer_tolerance: Tolerance,
+    pub logits_tolerance: Tolerance,
+}
+
 /// Runs layer 0 on the GPU with the real weights and compares every recorded
 /// tensor with the golden fixtures.
 ///
@@ -108,17 +122,18 @@ pub fn verify_layer_0(
     run_on_gpu(config, &weights, &prefill, &decode)
 }
 
-/// Runs the fixture prompt through every layer on the GPU and compares the
-/// last token after each layer with the golden fixtures.
+/// Runs the fixture prompt through the whole model on the GPU and compares
+/// the last token after each layer, the final norm and the logits with the
+/// golden fixtures.
 ///
 /// The run starts from the prompt's embeddings recorded in the fixtures, so
-/// the stacked layers are checked on their own.
+/// the model is checked before it has its own embedding lookup.
 ///
 /// # Errors
 ///
 /// Returns an error when a fixture or weight cannot be loaded, the GPU is
-/// unavailable, or a layer's output is outside the fixture tolerance.
-pub fn verify_layers(
+/// unavailable, or a tensor is outside its fixture tolerance.
+pub fn verify_model(
     artifacts: &Qwen3Artifacts,
     fixture_dir: impl AsRef<Path>,
 ) -> Result<Vec<BoundaryResult>> {
@@ -129,18 +144,23 @@ pub fn verify_layers(
 
     let rows = manifest.token_ids.len();
     let prefill = SafeTensorCatalog::open_files([fixture_dir.join(PREFILL_FILE)])?;
-    let input = load_tensor(&prefill, "input", &[rows, config.hidden_size])?;
-
-    // the fixture keeps the last prompt token after each layer
     let generation = SafeTensorCatalog::open_files([fixture_dir.join(GENERATION_FILE)])?;
-    let expected = load_tensor(
-        &generation,
-        "layer_outputs",
-        &[config.num_hidden_layers, config.hidden_size],
-    )?;
-    let tolerance = manifest.tolerance(GENERATION_FILE, "layer_output")?;
 
-    run_layers_on_gpu(artifacts, &input, rows, &expected, tolerance)
+    let fixture = ModelFixture {
+        rows,
+        input: load_tensor(&prefill, "input", &[rows, config.hidden_size])?,
+        layer_outputs: load_tensor(
+            &generation,
+            "layer_outputs",
+            &[config.num_hidden_layers, config.hidden_size],
+        )?,
+        final_norm: load_tensor(&generation, "final_norm", &[config.hidden_size])?,
+        logits: load_tensor(&generation, "prefill_logits", &[config.vocab_size])?,
+        layer_tolerance: manifest.tolerance(GENERATION_FILE, "layer_output")?,
+        logits_tolerance: manifest.tolerance(GENERATION_FILE, "logits")?,
+    };
+
+    run_model_on_gpu(artifacts, &fixture)
 }
 
 fn load_fixture(
@@ -232,47 +252,74 @@ fn run_on_gpu(
 }
 
 #[cfg(feature = "cuda")]
-fn run_layers_on_gpu(
+fn run_model_on_gpu(
     artifacts: &Qwen3Artifacts,
-    input: &[f32],
-    rows: usize,
-    expected: &[f32],
-    tolerance: Tolerance,
+    fixture: &ModelFixture,
 ) -> Result<Vec<BoundaryResult>> {
     use crate::model::Model;
     use crate::trace::Trace;
 
     let hidden_size = artifacts.config.hidden_size;
+    let rows = fixture.rows;
     let backend = cuda_backend::Backend::new()?;
     let model = Model::load(&backend, artifacts)?;
 
     let mut trace = Trace::recording();
-    let x = backend.upload(input, &[rows, hidden_size])?;
+    let x = backend.upload(&fixture.input, &[rows, hidden_size])?;
     model.forward(x, rows, &[], &mut trace)?;
 
     let mut results = Vec::new();
-    for (layer, expected) in expected.chunks(hidden_size).enumerate() {
+    for (layer, expected) in fixture.layer_outputs.chunks(hidden_size).enumerate() {
         let name = format!("layer_{layer}_output");
         let output = trace.get(&name)?;
         let last_row = &output[(rows - 1) * hidden_size..];
-        let max_abs_error = tolerance.compare(&name, last_row, expected)?;
-
-        results.push(BoundaryResult {
+        check(
+            &mut results,
             name,
-            max_abs_error,
-            tolerance,
-        });
+            last_row,
+            expected,
+            fixture.layer_tolerance,
+        )?;
     }
+    // the final norm has no tolerance of its own, so it is held to the layer one
+    check(
+        &mut results,
+        "final_norm".to_owned(),
+        trace.get("final_norm")?,
+        &fixture.final_norm,
+        fixture.layer_tolerance,
+    )?;
+    check(
+        &mut results,
+        "prefill_logits".to_owned(),
+        trace.get("logits")?,
+        &fixture.logits,
+        fixture.logits_tolerance,
+    )?;
     Ok(results)
 }
 
+#[cfg(feature = "cuda")]
+fn check(
+    results: &mut Vec<BoundaryResult>,
+    name: String,
+    actual: &[f32],
+    expected: &[f32],
+    tolerance: Tolerance,
+) -> Result<()> {
+    let max_abs_error = tolerance.compare(&name, actual, expected)?;
+    results.push(BoundaryResult {
+        name,
+        max_abs_error,
+        tolerance,
+    });
+    Ok(())
+}
+
 #[cfg(not(feature = "cuda"))]
-fn run_layers_on_gpu(
+fn run_model_on_gpu(
     _artifacts: &Qwen3Artifacts,
-    _input: &[f32],
-    _rows: usize,
-    _expected: &[f32],
-    _tolerance: Tolerance,
+    _fixture: &ModelFixture,
 ) -> Result<Vec<BoundaryResult>> {
     Err(cuda_backend::BackendError::CudaDisabled.into())
 }

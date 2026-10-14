@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use engine_core::FixtureManifest;
 use model_qwen3::{
-    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, verify_layer_0, verify_layers,
+    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, verify_layer_0, verify_model,
 };
 use thiserror::Error;
 
@@ -175,9 +175,9 @@ fn verify(model_dir: &Path, fixture_dir: &Path) -> Result<(), CliError> {
     print_results(&results);
     println!("layer 0 checks passed: {}", results.len());
 
-    let results = verify_layers(&artifacts, fixture_dir)?;
+    let results = verify_model(&artifacts, fixture_dir)?;
     print_results(&results);
-    println!("layer output checks passed: {}", results.len());
+    println!("model checks passed: {}", results.len());
     Ok(())
 }
 

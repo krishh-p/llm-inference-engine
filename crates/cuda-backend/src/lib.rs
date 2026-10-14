@@ -195,6 +195,14 @@ pub enum BackendError {
         actual: Vec<i32>,
     },
 
+    #[error("copy_rows {name} rows {first}..{} do not fit in {available} rows", .first + .rows)]
+    RowRange {
+        name: &'static str,
+        first: usize,
+        rows: usize,
+        available: usize,
+    },
+
     #[error("{0} tensor must be contiguous and row-major")]
     NonContiguous(&'static str),
 

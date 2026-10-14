@@ -154,6 +154,11 @@ layer that went wrong. Errors grow from about `5e-7` after layer 0 to a few
 `1e-4` near the end, where hidden values reach the thousands and float32
 rounding steps are larger.
 
+The last token then goes through the final RMSNorm and the LM head. Qwen3-1.7B
+ties its LM head to the embedding table, so the head is the
+`[151936, 2048]` embedding matrix. The final norm and all 151,936 prefill
+logits are compared with the fixture too.
+
 ```bash
 make rust-verify
 ```

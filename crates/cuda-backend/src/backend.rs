@@ -10,7 +10,7 @@ use cutile::prelude::*;
 use crate::cublas::CublasHandle;
 use crate::matmul::{check_device, plan_gemm, plan_head_gemm};
 use crate::rms_norm::inverse_hidden_size;
-use crate::shapes::{dims, expect_shape};
+use crate::shapes::{check_row_range, dims, expect_shape};
 use crate::{BackendError, check_rms_norm_shape};
 
 /// One CUDA device with the stream and cuBLAS handle that every operation uses.
@@ -76,6 +76,47 @@ impl Backend {
         copy.to_host_vec()
             .sync_on(&self.stream)
             .map_err(cutile_error)
+    }
+
+    /// Copies `rows` rows of one matrix into another of the same width, so
+    /// `output[output_row + i] = input[input_row + i]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device or is not
+    /// contiguous, the widths differ, either range runs past its matrix, or
+    /// the copy fails.
+    #[allow(unsafe_code)]
+    pub fn copy_rows(
+        &self,
+        output: &mut Tensor<f32>,
+        output_row: usize,
+        input: &Tensor<f32>,
+        input_row: usize,
+        rows: usize,
+    ) -> Result<(), BackendError> {
+        let [input_rows, width] = dims("copy_rows", "input", input.shape())?;
+        let [output_rows, _] = dims("copy_rows", "output", output.shape())?;
+        expect_shape("copy_rows", "output", output.shape(), &[output_rows, width])?;
+        check_row_range("input", input_row, rows, input_rows)?;
+        check_row_range("output", output_row, rows, output_rows)?;
+        self.check_tensors(&[("input", input), ("output", &*output)])?;
+
+        let row_bytes = width * size_of::<f32>();
+        self.device.bind_to_thread().map_err(cuda_error)?;
+        // SAFETY: both tensors were checked to be contiguous float32 buffers
+        // on this device, both ranges were checked to lie inside them, and
+        // they stay borrowed until the stream has been drained below.
+        unsafe {
+            cuda_core::memcpy_dtod_async::<f32>(
+                device_pointer(output, output_row * row_bytes),
+                device_pointer(input, input_row * row_bytes),
+                rows * width,
+                &self.stream,
+            )
+            .map_err(cuda_error)?;
+        }
+        self.wait_for_stream()
     }
 
     /// Computes `output = left @ right` for row-major matrices.
@@ -527,6 +568,13 @@ pub fn reshape(tensor: Tensor<f32>, shape: &[usize]) -> Result<Tensor<f32>, Back
 fn device_address(tensor: &Tensor<f32>) -> usize {
     usize::try_from(tensor.device_pointer().cu_deviceptr())
         .expect("CUDA device addresses fit in usize")
+}
+
+/// The device address `offset_bytes` into a tensor, as the CUDA driver takes it.
+fn device_pointer(tensor: &Tensor<f32>, offset_bytes: usize) -> cuda_core::sys::CUdeviceptr {
+    (device_address(tensor) + offset_bytes)
+        .try_into()
+        .expect("CUDA device addresses fit in CUdeviceptr")
 }
 
 fn cuda_error(error: impl std::fmt::Display) -> BackendError {
