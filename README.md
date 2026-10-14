@@ -103,6 +103,12 @@ The RoPE kernel rotates the fixture's query and key tensors with the reference
 `cos` and `sin` tables, at positions from 0 to 32767. The tables are generated
 in Rust on the host and compared with the reference tables separately.
 
+The residual add and the RMSNorm that follows it also exist as one fused
+kernel. The smoke test checks that it leaves behind the same two tensors as
+the separate kernels, then times both versions on a prompt-sized `[5, 2048]`
+input and on a `[4096, 2048]` input that is large enough to be limited by
+memory rather than by launch overhead.
+
 It also checks matrix multiplication through cuBLAS. Tensors are row-major and
 cuBLAS is column-major, so the test multiplies small non-square matrices, with
 and without a transposed right operand, and compares them with a host
@@ -120,8 +126,8 @@ without a local NVIDIA GPU. It writes the GPU, toolchain,
 100-run warm benchmarks, profiler status and kernel verification results to
 `results/rust-smoke-*.json`.
 
-Every case here is about ten thousand elements or fewer, so the timings mostly
-measure launch overhead. Nsight Compute runs on Modal. Nsight Systems captures a trace but fails
+Apart from the `[4096, 2048]` fused case, every input here is about ten
+thousand elements or fewer, so those timings mostly measure launch overhead. Nsight Compute runs on Modal. Nsight Systems captures a trace but fails
 to import it into a report, and the result file records that failure.
 
 ## Rust layer 0 check

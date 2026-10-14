@@ -76,6 +76,25 @@ pub struct KernelBenchmark {
     pub launches_per_iteration: usize,
 }
 
+/// A residual add followed by `RMSNorm`, timed as two kernels and as one
+/// fused kernel on the same inputs.
+#[derive(Debug, Serialize)]
+pub struct FusedNormCaseResult {
+    pub rows: usize,
+    pub hidden_size: usize,
+    pub max_abs_difference: f32,
+    pub tolerance: f32,
+    pub unfused: KernelBenchmark,
+    pub fused: KernelBenchmark,
+    pub speedup: f64,
+    pub passed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FusedNormResult {
+    pub cases: Vec<FusedNormCaseResult>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RmsNormResult {
     pub cases: Vec<RmsNormCaseResult>,
@@ -132,6 +151,7 @@ pub struct SmokeReport {
     pub cutile_version: &'static str,
     pub vector_add: VectorAddResult,
     pub rms_norm: RmsNormResult,
+    pub fused_norm: FusedNormResult,
     pub rope: RopeResult,
     pub matmul: MatmulResult,
 }

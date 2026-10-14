@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use cuda_core::{Device, Stream};
 use cuda_kernels::{
-    add_f32, causal_softmax_f32, concat_rows_f32, rms_norm_f32, rope_f32, silu_mul_f32,
-    swap_leading_axes_f32,
+    add_f32, add_rms_norm_f32, causal_softmax_f32, concat_rows_f32, rms_norm_f32, rope_f32,
+    silu_mul_f32, swap_leading_axes_f32,
 };
 use cutile::prelude::*;
 
@@ -215,6 +215,58 @@ impl Backend {
         let _ = rms_norm_f32(
             output.partition([1, hidden_size.next_power_of_two()]),
             input,
+            weight,
+            inverse_hidden_size(hidden_size),
+            epsilon,
+        )
+        .sync_on(&self.stream)
+        .map_err(cutile_error)?;
+        Ok(())
+    }
+
+    /// Computes `sum = left + right` and the `RMSNorm` of that sum with one kernel.
+    ///
+    /// This gives the same results as [`Backend::add`] followed by
+    /// [`Backend::rms_norm`], without reading the sum back from memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device, a shape is wrong
+    /// or unsupported, or the kernel fails.
+    pub fn add_rms_norm(
+        &self,
+        sum: &mut Tensor<f32>,
+        output: &mut Tensor<f32>,
+        left: &Tensor<f32>,
+        right: &Tensor<f32>,
+        weight: &Tensor<f32>,
+        epsilon: f32,
+    ) -> Result<(), BackendError> {
+        let [rows, hidden_size] = dims("add_rms_norm", "left", left.shape())?;
+        check_rms_norm_shape(rows, hidden_size)?;
+        expect_shape("add_rms_norm", "right", right.shape(), &[rows, hidden_size])?;
+        expect_shape("add_rms_norm", "sum", sum.shape(), &[rows, hidden_size])?;
+        expect_shape(
+            "add_rms_norm",
+            "output",
+            output.shape(),
+            &[rows, hidden_size],
+        )?;
+        expect_shape("add_rms_norm", "weight", weight.shape(), &[hidden_size])?;
+        self.check_tensors(&[
+            ("left", left),
+            ("right", right),
+            ("weight", weight),
+            ("sum", &*sum),
+            ("output", &*output),
+        ])?;
+
+        let tile = [1, hidden_size.next_power_of_two()];
+        let _ = add_rms_norm_f32(
+            sum.partition(tile),
+            output.partition(tile),
+            left,
+            right,
             weight,
             inverse_hidden_size(hidden_size),
             epsilon,

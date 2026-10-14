@@ -6,7 +6,7 @@ pub use kernels::{
     causal_softmax_kernel::causal_softmax_f32,
     concat_rows_kernel::concat_rows_f32,
     elementwise_kernel::{add_f32, silu_mul_f32},
-    rms_norm_kernel::{rms_norm_bf16, rms_norm_f32},
+    rms_norm_kernel::{add_rms_norm_f32, rms_norm_bf16, rms_norm_f32},
     rope_kernel::rope_f32,
     swap_leading_axes_kernel::swap_leading_axes_f32,
     vector_add_kernel::vector_add,
@@ -33,6 +33,35 @@ mod kernels {
                 broadcast_scalar(inverse_hidden_size, shape![1]);
             let epsilon: Tile<f32, { [1] }> = broadcast_scalar(epsilon, shape![1]);
             let inverse_rms = rsqrt(sum * inverse_hidden_size + epsilon, ftz::Disabled);
+            let inverse_rms = inverse_rms.reshape(shape![1, 1]).broadcast(output.shape());
+
+            let weight: Tile<f32, { [H] }> = load_tile(weight, shape![H], [0]);
+            let weight = weight.reshape(shape![1, H]);
+            output.store(x * inverse_rms * weight);
+        }
+
+        /// Adds two matrices and normalizes the sum in one pass over each row.
+        /// Both the sum and the normalized sum are stored.
+        #[cutile::entry()]
+        pub fn add_rms_norm_f32<const H: i32>(
+            sum: &mut Tensor<f32, { [1, H] }>,
+            output: &mut Tensor<f32, { [1, H] }>,
+            left: &Tensor<f32, { [-1, -1] }>,
+            right: &Tensor<f32, { [-1, -1] }>,
+            weight: &Tensor<f32, { [-1] }>,
+            inverse_hidden_size: f32,
+            epsilon: f32,
+        ) {
+            let left: Tile<f32, { [1, H] }> = load_tile_like(left, sum);
+            let right: Tile<f32, { [1, H] }> = load_tile_like(right, sum);
+            let x = left + right;
+            sum.store(x);
+
+            let total: Tile<f32, { [1] }> = reduce_sum(x * x, 1);
+            let inverse_hidden_size: Tile<f32, { [1] }> =
+                broadcast_scalar(inverse_hidden_size, shape![1]);
+            let epsilon: Tile<f32, { [1] }> = broadcast_scalar(epsilon, shape![1]);
+            let inverse_rms = rsqrt(total * inverse_hidden_size + epsilon, ftz::Disabled);
             let inverse_rms = inverse_rms.reshape(shape![1, 1]).broadcast(output.shape());
 
             let weight: Tile<f32, { [H] }> = load_tile(weight, shape![H], [0]);

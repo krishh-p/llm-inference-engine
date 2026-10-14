@@ -55,13 +55,15 @@ impl<'a> Block<'a> {
         backend.rms_norm(&mut normalized, x, &self.input_norm, self.epsilon)?;
         trace.save(backend, "input_norm", &normalized)?;
         let (attention_output, cache) = self.attention.forward(&normalized, rows, cache, trace)?;
-        let mut x_after_attention = backend.zeros(&shape)?;
-        backend.add(&mut x_after_attention, x, &attention_output)?;
 
+        // the residual add and the norm that follows it run as one kernel
+        let mut x_after_attention = backend.zeros(&shape)?;
         let mut normalized = backend.zeros(&shape)?;
-        backend.rms_norm(
+        backend.add_rms_norm(
+            &mut x_after_attention,
             &mut normalized,
-            &x_after_attention,
+            x,
+            &attention_output,
             &self.post_attention_norm,
             self.epsilon,
         )?;

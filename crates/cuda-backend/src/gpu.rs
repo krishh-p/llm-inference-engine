@@ -12,9 +12,9 @@ use crate::rms_norm::{RmsNormBf16Case, RmsNormF32Case, RmsNormFixtures, inverse_
 use crate::rope::{RopeCase, RopeFixtures, check_tables};
 use crate::shapes::dims;
 use crate::{
-    BackendError, GpuInfo, KernelBenchmark, MatmulCaseResult, MatmulResult, RmsNormCaseResult,
-    RmsNormResult, RopeCaseResult, RopeResult, SmokeReport, VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS,
-    VectorAddResult, check_rms_norm_shape,
+    BackendError, FusedNormCaseResult, FusedNormResult, GpuInfo, KernelBenchmark, MatmulCaseResult,
+    MatmulResult, RmsNormCaseResult, RmsNormResult, RopeCaseResult, RopeResult, SmokeReport,
+    VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS, VectorAddResult, check_rms_norm_shape,
 };
 
 const VECTOR_MAX_ABS_ERROR: f32 = 1.0e-6;
@@ -24,6 +24,9 @@ const MATMUL_MAX_ABS_ERROR: f32 = 1.0e-6;
 const KERNEL_MATMUL_SIZE: usize = 16;
 const F32_TOLERANCE: f32 = 1.0e-5;
 const BF16_TOLERANCE: f32 = 1.0e-2;
+// One prompt-sized input, where launch overhead dominates, and one large
+// enough for the time to go to reading and writing memory.
+const FUSED_NORM_SHAPES: [[usize; 2]; 2] = [[5, 2048], [4096, 2048]];
 const BENCHMARK_WARMUP_ITERATIONS: usize = 10;
 const BENCHMARK_ITERATIONS: usize = 100;
 
@@ -63,7 +66,9 @@ pub(super) fn run_smoke(
     let compute_capability = compute_capability(&backend.device)?;
 
     let vector_add = run_vector_add(&backend.stream)?;
+    let epsilon = rms_norm_fixtures.epsilon;
     let rms_norm = run_rms_norm_suite(&backend, rms_norm_fixtures)?;
+    let fused_norm = run_fused_norm_suite(&backend, epsilon)?;
     let rope = run_rope_suite(&backend, rope_fixtures)?;
     let matmul = run_matmul_suite(&backend)?;
 
@@ -77,6 +82,7 @@ pub(super) fn run_smoke(
         cutile_version: "0.4.0",
         vector_add,
         rms_norm,
+        fused_norm,
         rope,
         matmul,
     })
@@ -274,6 +280,102 @@ fn run_rms_norm_bf16(
         max_abs_error,
         tolerance: BF16_TOLERANCE,
         benchmark,
+        passed: true,
+    })
+}
+
+fn run_fused_norm_suite(backend: &Backend, epsilon: f32) -> Result<FusedNormResult, BackendError> {
+    let mut cases = Vec::with_capacity(FUSED_NORM_SHAPES.len());
+    for [rows, hidden_size] in FUSED_NORM_SHAPES {
+        cases.push(run_fused_norm_case(backend, rows, hidden_size, epsilon)?);
+    }
+    Ok(FusedNormResult { cases })
+}
+
+fn run_fused_norm_case(
+    backend: &Backend,
+    rows: usize,
+    hidden_size: usize,
+    epsilon: f32,
+) -> Result<FusedNormCaseResult, BackendError> {
+    let shape = [rows, hidden_size];
+    let elements = rows * hidden_size;
+    let left = backend.upload(&cycling(17, elements), &shape)?;
+    let right = backend.upload(&cycling(13, elements), &shape)?;
+    let weight = backend.upload(&cycling(7, hidden_size), &[hidden_size])?;
+
+    let mut sum = backend.zeros(&shape)?;
+    let mut output = backend.zeros(&shape)?;
+    let mut fused_sum = backend.zeros(&shape)?;
+    let mut fused_output = backend.zeros(&shape)?;
+
+    backend.add(&mut sum, &left, &right)?;
+    backend.rms_norm(&mut output, &sum, &weight, epsilon)?;
+    backend.add_rms_norm(
+        &mut fused_sum,
+        &mut fused_output,
+        &left,
+        &right,
+        &weight,
+        epsilon,
+    )?;
+
+    // the fused kernel must leave behind the same two tensors
+    let sum_difference = verify(
+        "fused_norm_sum",
+        &backend.download(&fused_sum)?,
+        &backend.download(&sum)?,
+        F32_TOLERANCE,
+    )?;
+    let output_difference = verify(
+        "fused_norm_output",
+        &backend.download(&fused_output)?,
+        &backend.download(&output)?,
+        F32_TOLERANCE,
+    )?;
+
+    for _ in 0..BENCHMARK_WARMUP_ITERATIONS {
+        backend.add(&mut sum, &left, &right)?;
+        backend.rms_norm(&mut output, &sum, &weight, epsilon)?;
+        backend.add_rms_norm(
+            &mut fused_sum,
+            &mut fused_output,
+            &left,
+            &right,
+            &weight,
+            epsilon,
+        )?;
+    }
+    let unfused = measure(&backend.stream, BENCHMARK_ITERATIONS, || {
+        backend.add(&mut sum, &left, &right)?;
+        backend.rms_norm(&mut output, &sum, &weight, epsilon)
+    })?;
+    let fused = measure(&backend.stream, BENCHMARK_ITERATIONS, || {
+        backend.add_rms_norm(
+            &mut fused_sum,
+            &mut fused_output,
+            &left,
+            &right,
+            &weight,
+            epsilon,
+        )
+    })?;
+
+    // Unfused moves five matrices: two read and one written by the add, then
+    // one read and one written by the norm. Fused reads two and writes two.
+    let matrix_bytes = elements * size_of::<f32>();
+    let unfused = summarize(unfused, matrix_bytes * 5, 2);
+    let fused = summarize(fused, matrix_bytes * 4, 1);
+    let speedup = unfused.median_ms / fused.median_ms;
+
+    Ok(FusedNormCaseResult {
+        rows,
+        hidden_size,
+        max_abs_difference: sum_difference.max(output_difference),
+        tolerance: F32_TOLERANCE,
+        unfused,
+        fused,
+        speedup,
         passed: true,
     })
 }
@@ -498,7 +600,7 @@ fn benchmark_rms_norm_f32(
     })?;
 
     let [rows, hidden_size] = dims("rms_norm", "input", input.shape())?;
-    Ok(summarize(timings, logical_bytes(rows, hidden_size, 4)))
+    Ok(summarize(timings, logical_bytes(rows, hidden_size, 4), 1))
 }
 
 fn benchmark_rms_norm_bf16(
@@ -517,6 +619,7 @@ fn benchmark_rms_norm_bf16(
     Ok(summarize(
         timings,
         logical_bytes(params.rows, params.hidden_size, 2),
+        1,
     ))
 }
 
@@ -540,12 +643,16 @@ fn measure(
     Ok(timings)
 }
 
-fn summarize(mut timings: Vec<f64>, logical_bytes: usize) -> KernelBenchmark {
+fn summarize(
+    mut timings: Vec<f64>,
+    logical_bytes: usize,
+    launches_per_iteration: usize,
+) -> KernelBenchmark {
     timings.sort_by(f64::total_cmp);
     let median_ms = percentile(&timings, 50);
     let p95_ms = percentile(&timings, 95);
     let logical_bytes =
-        u32::try_from(logical_bytes).expect("an RMSNorm fixture fits in four gigabytes");
+        u32::try_from(logical_bytes).expect("a benchmark input fits in four gigabytes");
     let effective_bandwidth_gbps = f64::from(logical_bytes) / (median_ms / 1_000.0) / 1.0e9;
 
     KernelBenchmark {
@@ -555,7 +662,7 @@ fn summarize(mut timings: Vec<f64>, logical_bytes: usize) -> KernelBenchmark {
         median_ms,
         p95_ms,
         effective_bandwidth_gbps,
-        launches_per_iteration: 1,
+        launches_per_iteration,
     }
 }
 

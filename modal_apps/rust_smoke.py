@@ -410,6 +410,14 @@ def main() -> None:
             f"median_ms={benchmark['median_ms']:.4f}, "
             f"bandwidth_gbps={benchmark['effective_bandwidth_gbps']:.2f}"
         )
+    for case in result["fused_norm"]["cases"]:
+        print(
+            f"fused_norm_{case['rows']}x{case['hidden_size']}: "
+            f"max_abs_difference={case['max_abs_difference']}, "
+            f"unfused_median_ms={case['unfused']['median_ms']:.4f}, "
+            f"fused_median_ms={case['fused']['median_ms']:.4f}, "
+            f"speedup={case['speedup']:.2f}"
+        )
     tables = result["rope"]["tables"]
     print(
         f"rope_tables: cos_max_abs_error={tables['cos_max_abs_error']}, "
