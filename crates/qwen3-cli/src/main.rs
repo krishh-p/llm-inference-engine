@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use engine_core::FixtureManifest;
 use model_qwen3::{
-    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, verify_layer_0, verify_model,
+    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, verify_generation,
+    verify_layer_0, verify_model,
 };
 use thiserror::Error;
 
@@ -42,7 +43,8 @@ enum Command {
         model_id: String,
     },
 
-    /// Run layer 0 and then every layer on the GPU and compare them with the golden fixtures.
+    /// Run layer 0 and the whole model on the GPU, compare them with the golden
+    /// fixtures, and check the greedy tokens for every regression prompt.
     Verify {
         /// Directory containing config.json, tokenizer.json and `SafeTensors` weights.
         #[arg(long)]
@@ -51,6 +53,10 @@ enum Command {
         /// Directory containing manifest.json and the golden `SafeTensors` files.
         #[arg(long, default_value = "tests/fixtures")]
         fixtures: PathBuf,
+
+        /// JSON file containing fixed prompts and the tokens they should generate.
+        #[arg(long, default_value = "tests/prompts.json")]
+        prompts: PathBuf,
     },
 }
 
@@ -103,7 +109,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Verify {
             model_dir,
             fixtures,
-        } => verify(&model_dir, &fixtures),
+            prompts,
+        } => verify(&model_dir, &fixtures, &prompts),
     }
 }
 
@@ -168,7 +175,7 @@ fn inspect(
     Ok(())
 }
 
-fn verify(model_dir: &Path, fixture_dir: &Path) -> Result<(), CliError> {
+fn verify(model_dir: &Path, fixture_dir: &Path, prompts_path: &Path) -> Result<(), CliError> {
     let artifacts = Qwen3Artifacts::open(model_dir)?;
 
     let results = verify_layer_0(&artifacts, fixture_dir)?;
@@ -178,6 +185,19 @@ fn verify(model_dir: &Path, fixture_dir: &Path) -> Result<(), CliError> {
     let results = verify_model(&artifacts, fixture_dir)?;
     print_results(&results);
     println!("model checks passed: {}", results.len());
+
+    let prompts = RegressionPromptSet::load(prompts_path)?;
+    let results = verify_generation(&artifacts, &prompts)?;
+    for result in &results {
+        println!(
+            "{:?} (stops at {:?}): {:?} {:?}",
+            result.prompt,
+            result.eos_ids,
+            result.token_ids,
+            artifacts.tokenizer.decode(&result.token_ids)?
+        );
+    }
+    println!("generation checks passed: {}", results.len());
     Ok(())
 }
 

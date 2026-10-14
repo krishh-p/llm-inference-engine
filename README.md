@@ -164,6 +164,14 @@ logits are compared with the fixture too. Finally, the first generated token
 is decoded against the caches the prompt left in every layer, and its logits
 are checked the same way.
 
+Last, the command generates greedily from each prompt in `tests/prompts.json`
+and requires the exact token IDs recorded for it. The prompt runs once, then
+each new token runs on its own against the caches, and the largest logit picks
+the next token. Generation ends at the end-of-sequence token or after
+`max_new_tokens`. The base model rarely ends a short completion on its own,
+so one extra run treats a token it is known to generate as the end-of-sequence
+token and checks that generation stops right after it.
+
 ```bash
 make rust-verify
 ```

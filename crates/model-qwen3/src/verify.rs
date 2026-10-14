@@ -164,7 +164,7 @@ pub fn verify_model(
             .expected_greedy_token_ids
             .first()
             .copied()
-            .ok_or(ModelError::EmptyManifestField("expected_greedy_token_ids"))?,
+            .ok_or_else(|| ModelError::MissingTensor("expected_greedy_token_ids".to_owned()))?,
         decode_logits: load_tensor(&generation, "decode_logits", &[config.vocab_size])?,
         layer_tolerance: manifest.tolerance(GENERATION_FILE, "layer_output")?,
         logits_tolerance: manifest.tolerance(GENERATION_FILE, "logits")?,

@@ -105,6 +105,11 @@ impl<'a> Model<'a> {
         Ok((logits, new_caches))
     }
 
+    /// How many positions the model can attend over.
+    pub(crate) fn max_positions(&self) -> usize {
+        self.config.max_position_embeddings
+    }
+
     /// Looks up each token's row of the embedding table, `[tokens, hidden_size]`.
     fn embed(&self, token_ids: &[u32]) -> Result<Tensor<f32>> {
         let mut x = self

@@ -50,4 +50,18 @@ impl Qwen3Tokenizer {
                 message: error.to_string(),
             })
     }
+
+    /// Turns token IDs back into text, leaving out special tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tokenizer cannot decode the IDs.
+    pub fn decode(&self, token_ids: &[u32]) -> Result<String> {
+        self.tokenizer
+            .decode(token_ids, true)
+            .map_err(|error| ModelError::Detokenize {
+                token_ids: token_ids.to_vec(),
+                message: error.to_string(),
+            })
+    }
 }

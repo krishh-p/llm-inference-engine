@@ -39,6 +39,12 @@ pub enum ModelError {
     #[error("failed to tokenize prompt {prompt:?}: {message}")]
     Tokenize { prompt: String, message: String },
 
+    #[error("failed to decode token IDs {token_ids:?}: {message}")]
+    Detokenize {
+        token_ids: Vec<u32>,
+        message: String,
+    },
+
     #[error("prompt {prompt:?} tokenized to {actual:?}, expected {expected:?}")]
     TokenMismatch {
         prompt: String,
@@ -51,6 +57,28 @@ pub enum ModelError {
 
     #[error("forward pass got {actual} KV caches, expected 0 or {expected}")]
     CacheCount { expected: usize, actual: usize },
+
+    #[error("the prompt has no tokens")]
+    EmptyPrompt,
+
+    #[error("max_new_tokens must be at least 1")]
+    NoNewTokens,
+
+    #[error(
+        "{prompt_tokens} prompt tokens plus {max_new_tokens} new tokens do not fit in {max_positions} positions"
+    )]
+    ContextTooLong {
+        prompt_tokens: usize,
+        max_new_tokens: usize,
+        max_positions: usize,
+    },
+
+    #[error("prompt {prompt:?} generated {actual:?}, expected {expected:?}")]
+    GenerationMismatch {
+        prompt: String,
+        expected: Vec<u32>,
+        actual: Vec<u32>,
+    },
 
     #[error("fixture manifest field {0} is empty")]
     EmptyManifestField(&'static str),

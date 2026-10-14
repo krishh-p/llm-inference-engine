@@ -1,6 +1,7 @@
 mod artifacts;
 mod config;
 mod error;
+mod generate;
 mod prompts;
 mod tokenizer;
 mod verify;
@@ -22,4 +23,6 @@ pub use config::Qwen3Config;
 pub use error::{ModelError, Result};
 pub use prompts::{RegressionCase, RegressionPromptSet};
 pub use tokenizer::Qwen3Tokenizer;
-pub use verify::{BoundaryResult, verify_layer_0, verify_model};
+pub use verify::{
+    BoundaryResult, GenerationResult, verify_generation, verify_layer_0, verify_model,
+};

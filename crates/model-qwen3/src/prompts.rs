@@ -14,6 +14,8 @@ pub struct RegressionPromptSet {
 pub struct RegressionCase {
     pub prompt: String,
     pub token_ids: Vec<u32>,
+    /// The greedy tokens the reference generates after the prompt.
+    pub expected_token_ids: Vec<u32>,
 }
 
 impl RegressionPromptSet {
