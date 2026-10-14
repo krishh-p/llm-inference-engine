@@ -2,12 +2,13 @@ use std::path::Path;
 
 use engine_core::{FixtureManifest, SafeTensorCatalog, Tolerance};
 
-use crate::weights::{AttentionWeights, load_tensor};
+use crate::weights::{LayerWeights, load_tensor};
 use crate::{Qwen3Artifacts, Qwen3Config, Result};
 
 // Each fixture tensor is listed with the manifest tolerance that applies to it.
 const PREFILL_FILE: &str = "block_0.safetensors";
-const PREFILL_TENSORS: [(&str, &str); 8] = [
+const PREFILL_TENSORS: [(&str, &str); 12] = [
+    ("input_norm", "norm"),
     ("q", "projection"),
     ("k", "projection"),
     ("v", "projection"),
@@ -16,6 +17,9 @@ const PREFILL_TENSORS: [(&str, &str); 8] = [
     ("scores", "scores"),
     ("attention_probs", "probs"),
     ("attention_output", "attention_output"),
+    ("mlp_input", "norm"),
+    ("mlp_output", "mlp_output"),
+    ("output", "block_output"),
 ];
 const DECODE_FILE: &str = "decode_block_0.safetensors";
 const DECODE_TENSORS: [(&str, &str); 3] = [
@@ -37,7 +41,7 @@ pub struct BoundaryResult {
 pub(crate) struct LayerFixture {
     pub name: &'static str,
     pub rows: usize,
-    /// The normalized layer input, `[rows, hidden_size]`.
+    /// `[rows, hidden_size]`.
     pub input: Vec<f32>,
     pub expected: Vec<ExpectedTensor>,
 }
@@ -49,11 +53,11 @@ pub(crate) struct ExpectedTensor {
     pub tolerance: Tolerance,
 }
 
-/// Runs layer 0's attention on the GPU with the real weights and compares
-/// every recorded tensor with the golden fixtures.
+/// Runs layer 0 on the GPU with the real weights and compares every recorded
+/// tensor with the golden fixtures.
 ///
-/// Prefill is checked all the way to the attention output. Decode is checked
-/// up to its projections.
+/// Prefill is checked through the whole layer. Decode is checked up to its
+/// projections.
 ///
 /// # Errors
 ///
@@ -68,13 +72,15 @@ pub fn verify_layer_0(
     let manifest = FixtureManifest::load(fixture_dir.join("manifest.json"))?;
     manifest.validate_files(fixture_dir)?;
 
-    let weights = AttentionWeights::load(artifacts, 0)?;
+    let weights = LayerWeights::load(artifacts, 0)?;
+    // prefill starts from the layer input, decode from the normalized input
     let prefill = load_fixture(
         &manifest,
         fixture_dir,
         config,
         "prefill",
         PREFILL_FILE,
+        "input",
         &PREFILL_TENSORS,
     )?;
     let decode = load_fixture(
@@ -83,6 +89,7 @@ pub fn verify_layer_0(
         config,
         "decode",
         DECODE_FILE,
+        "input_norm",
         &DECODE_TENSORS,
     )?;
 
@@ -95,11 +102,11 @@ fn load_fixture(
     config: &Qwen3Config,
     name: &'static str,
     file: &str,
+    input: &str,
     tensors: &[(&'static str, &str)],
 ) -> Result<LayerFixture> {
     let catalog = SafeTensorCatalog::open_files([fixture_dir.join(file)])?;
-    let input = catalog.load("input_norm")?;
-    let rows = input.descriptor.layout.element_count() / config.hidden_size;
+    let rows = catalog.load(input)?.descriptor.layout.element_count() / config.hidden_size;
 
     let mut expected = Vec::with_capacity(tensors.len());
     for &(tensor, tolerance) in tensors {
@@ -113,7 +120,7 @@ fn load_fixture(
     Ok(LayerFixture {
         name,
         rows,
-        input: load_tensor(&catalog, "input_norm", &[rows, config.hidden_size])?,
+        input: load_tensor(&catalog, input, &[rows, config.hidden_size])?,
         expected,
     })
 }
@@ -121,18 +128,57 @@ fn load_fixture(
 #[cfg(feature = "cuda")]
 fn run_on_gpu(
     config: &Qwen3Config,
-    weights: &AttentionWeights,
+    weights: &LayerWeights,
     positions: &[u32],
     prefill: &LayerFixture,
     decode: &LayerFixture,
 ) -> Result<Vec<BoundaryResult>> {
-    crate::attention::verify(config, weights, positions, prefill, decode)
+    use crate::block::Block;
+    use crate::trace::Trace;
+
+    let backend = cuda_backend::Backend::new()?;
+    let block = Block::new(&backend, config, weights)?;
+    let mut results = Vec::new();
+
+    let mut trace = Trace::default();
+    let x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
+    block.prefill(&x, positions, &mut trace)?;
+    compare(prefill, &trace, &mut results)?;
+
+    let mut trace = Trace::default();
+    let x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
+    block.attention.project(&x, decode.rows, &mut trace)?;
+    compare(decode, &trace, &mut results)?;
+
+    Ok(results)
+}
+
+#[cfg(feature = "cuda")]
+fn compare(
+    fixture: &LayerFixture,
+    trace: &crate::trace::Trace,
+    results: &mut Vec<BoundaryResult>,
+) -> Result<()> {
+    for expected in &fixture.expected {
+        let name = format!("{}_{}", fixture.name, expected.name);
+        let actual = trace.get(expected.name)?;
+        let max_abs_error = expected
+            .tolerance
+            .compare(&name, actual, &expected.values)?;
+
+        results.push(BoundaryResult {
+            name,
+            max_abs_error,
+            tolerance: expected.tolerance,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "cuda"))]
 fn run_on_gpu(
     _config: &Qwen3Config,
-    _weights: &AttentionWeights,
+    _weights: &LayerWeights,
     _positions: &[u32],
     _prefill: &LayerFixture,
     _decode: &LayerFixture,

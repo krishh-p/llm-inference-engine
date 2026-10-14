@@ -4,6 +4,7 @@
 #[cfg(feature = "cuda")]
 pub use kernels::{
     causal_softmax_kernel::causal_softmax_f32,
+    elementwise_kernel::{add_f32, silu_mul_f32},
     rms_norm_kernel::{rms_norm_bf16, rms_norm_f32},
     rope_kernel::rope_f32,
     swap_leading_axes_kernel::swap_leading_axes_f32,
@@ -149,6 +150,40 @@ mod kernels {
             let sum: Tile<f32, { [1, 1] }> = reduce_sum(weight, 2);
             let sum = sum.reshape(shape![1, 1, 1]).broadcast(shape![1, 1, N]);
             output.store(weight / sum);
+        }
+    }
+
+    #[cutile::module]
+    pub mod elementwise_kernel {
+        #[allow(clippy::wildcard_imports)]
+        use cutile::core::*;
+
+        /// Adds two matrices, one row per tile.
+        #[cutile::entry()]
+        pub fn add_f32<const W: i32>(
+            output: &mut Tensor<f32, { [1, W] }>,
+            left: &Tensor<f32, { [-1, -1] }>,
+            right: &Tensor<f32, { [-1, -1] }>,
+        ) {
+            let left: Tile<f32, { [1, W] }> = load_tile_like(left, output);
+            let right: Tile<f32, { [1, W] }> = load_tile_like(right, output);
+            output.store(left + right);
+        }
+
+        /// Computes `silu(gate) * up`, where `silu(x) = x * sigmoid(x)`.
+        #[cutile::entry()]
+        pub fn silu_mul_f32<const W: i32>(
+            output: &mut Tensor<f32, { [1, W] }>,
+            gate: &Tensor<f32, { [-1, -1] }>,
+            up: &Tensor<f32, { [-1, -1] }>,
+        ) {
+            let gate: Tile<f32, { [1, W] }> = load_tile_like(gate, output);
+            let up: Tile<f32, { [1, W] }> = load_tile_like(up, output);
+
+            let zero: Tile<f32, { [1, W] }> = constant(0.0f32, shape![1, W]);
+            let one: Tile<f32, { [1, W] }> = constant(1.0f32, shape![1, W]);
+            let sigmoid = one / (one + exp(zero - gate));
+            output.store(gate * sigmoid * up);
         }
     }
 

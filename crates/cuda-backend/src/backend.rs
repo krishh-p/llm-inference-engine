@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use cuda_core::{Device, Stream};
-use cuda_kernels::{causal_softmax_f32, rms_norm_f32, rope_f32, swap_leading_axes_f32};
+use cuda_kernels::{
+    add_f32, causal_softmax_f32, rms_norm_f32, rope_f32, silu_mul_f32, swap_leading_axes_f32,
+};
 use cutile::prelude::*;
 
 use crate::cublas::CublasHandle;
@@ -139,6 +141,53 @@ impl Backend {
         scale: f32,
     ) -> Result<(), BackendError> {
         self.head_gemm(output, left, right, true, scale)
+    }
+
+    /// Computes `output = left + right` for matrices of the same shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device, the shapes do not
+    /// agree, or the kernel fails.
+    pub fn add(
+        &self,
+        output: &mut Tensor<f32>,
+        left: &Tensor<f32>,
+        right: &Tensor<f32>,
+    ) -> Result<(), BackendError> {
+        let [rows, cols] = dims("add", "left", left.shape())?;
+        expect_shape("add", "right", right.shape(), &[rows, cols])?;
+        expect_shape("add", "output", output.shape(), &[rows, cols])?;
+        self.check_tensors(&[("left", left), ("right", right), ("output", &*output)])?;
+
+        // elements past the real width are padding and are never stored
+        let _ = add_f32(output.partition([1, cols.next_power_of_two()]), left, right)
+            .sync_on(&self.stream)
+            .map_err(cutile_error)?;
+        Ok(())
+    }
+
+    /// Computes `output = silu(gate) * up` for matrices of the same shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device, the shapes do not
+    /// agree, or the kernel fails.
+    pub fn silu_mul(
+        &self,
+        output: &mut Tensor<f32>,
+        gate: &Tensor<f32>,
+        up: &Tensor<f32>,
+    ) -> Result<(), BackendError> {
+        let [rows, cols] = dims("silu_mul", "gate", gate.shape())?;
+        expect_shape("silu_mul", "up", up.shape(), &[rows, cols])?;
+        expect_shape("silu_mul", "output", output.shape(), &[rows, cols])?;
+        self.check_tensors(&[("gate", gate), ("up", up), ("output", &*output)])?;
+
+        let _ = silu_mul_f32(output.partition([1, cols.next_power_of_two()]), gate, up)
+            .sync_on(&self.stream)
+            .map_err(cutile_error)?;
+        Ok(())
     }
 
     /// Normalizes each row of a `[rows, hidden_size]` matrix and scales it by `weight`.

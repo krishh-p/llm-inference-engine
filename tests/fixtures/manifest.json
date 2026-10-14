@@ -293,6 +293,8 @@
         }
       },
       "tolerances": {
+        "norm_atol": 1e-05,
+        "norm_rtol": 1e-05,
         "projection_atol": 1e-05,
         "projection_rtol": 1e-05,
         "rope_atol": 1e-05,
@@ -302,7 +304,11 @@
         "probs_atol": 1e-05,
         "probs_rtol": 1e-05,
         "attention_output_atol": 1e-05,
-        "attention_output_rtol": 1e-05
+        "attention_output_rtol": 1e-05,
+        "mlp_output_atol": 1e-05,
+        "mlp_output_rtol": 1e-05,
+        "block_output_atol": 1e-05,
+        "block_output_rtol": 1e-05
       },
       "bytes": 393288,
       "sha256": "66bf6ef66e684f62886aee4bc5f6290200dcf8fc1eb022a6d07bfdf0c0c144cd"
@@ -453,6 +459,8 @@
         }
       },
       "tolerances": {
+        "norm_atol": 1e-05,
+        "norm_rtol": 1e-05,
         "projection_atol": 1e-05,
         "projection_rtol": 1e-05,
         "rope_atol": 1e-05,
@@ -462,7 +470,11 @@
         "probs_atol": 1e-05,
         "probs_rtol": 1e-05,
         "attention_output_atol": 1e-05,
-        "attention_output_rtol": 1e-05
+        "attention_output_rtol": 1e-05,
+        "mlp_output_atol": 1e-05,
+        "mlp_output_rtol": 1e-05,
+        "block_output_atol": 1e-05,
+        "block_output_rtol": 1e-05
       },
       "bytes": 170120,
       "sha256": "9c9a27d735d7616b785e4d0266e1d0acfba2b36e41f5a7e715f56dce64bf7654"

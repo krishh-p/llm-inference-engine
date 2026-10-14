@@ -8,6 +8,12 @@ mod weights;
 
 #[cfg(feature = "cuda")]
 mod attention;
+#[cfg(feature = "cuda")]
+mod block;
+#[cfg(feature = "cuda")]
+mod mlp;
+#[cfg(feature = "cuda")]
+mod trace;
 
 pub use artifacts::{ModelSummary, Qwen3Artifacts};
 pub use config::Qwen3Config;

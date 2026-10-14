@@ -19,11 +19,14 @@ RMS_NORM_FLOAT32_ATOL = 1e-5
 RMS_NORM_BFLOAT16_ATOL = 1e-2
 # allowed error is atol + rtol * |expected|, one pair per stage of the block
 BLOCK_TOLERANCES = {
+    "norm": (1e-5, 1e-5),
     "projection": (1e-5, 1e-5),
     "rope": (1e-5, 1e-5),
     "scores": (1e-4, 1e-5),
     "probs": (1e-5, 1e-5),
     "attention_output": (1e-5, 1e-5),
+    "mlp_output": (1e-5, 1e-5),
+    "block_output": (1e-5, 1e-5),
 }
 
 SOURCE_DIR = Path(__file__).resolve().parent

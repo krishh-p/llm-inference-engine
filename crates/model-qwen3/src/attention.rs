@@ -1,30 +1,8 @@
 use cuda_backend::{Backend, Tensor, reshape, rope_tables};
 
-use crate::verify::{BoundaryResult, LayerFixture};
+use crate::trace::Trace;
 use crate::weights::AttentionWeights;
-use crate::{ModelError, Qwen3Config, Result};
-
-/// Host copies of the tensors a forward pass produced, saved by name so they
-/// can be compared with the reference's trace.
-#[derive(Default)]
-pub(crate) struct Trace {
-    tensors: Vec<(&'static str, Vec<f32>)>,
-}
-
-impl Trace {
-    fn save(&mut self, backend: &Backend, name: &'static str, tensor: &Tensor<f32>) -> Result<()> {
-        self.tensors.push((name, backend.download(tensor)?));
-        Ok(())
-    }
-
-    fn get(&self, name: &str) -> Result<&[f32]> {
-        self.tensors
-            .iter()
-            .find(|(saved, _)| *saved == name)
-            .map(|(_, values)| values.as_slice())
-            .ok_or_else(|| ModelError::MissingTensor(name.to_owned()))
-    }
-}
+use crate::{Qwen3Config, Result};
 
 /// One layer's attention with its weights on the GPU.
 pub(crate) struct Attention<'a> {
@@ -188,46 +166,4 @@ impl<'a> Attention<'a> {
         let head_dim = u16::try_from(self.head_dim).expect("head_dim fits in u16");
         f32::from(head_dim).sqrt().recip()
     }
-}
-
-/// Runs layer 0 on both fixtures and compares every traced tensor.
-pub(crate) fn verify(
-    config: &Qwen3Config,
-    weights: &AttentionWeights,
-    positions: &[u32],
-    prefill: &LayerFixture,
-    decode: &LayerFixture,
-) -> Result<Vec<BoundaryResult>> {
-    let backend = Backend::new()?;
-    let attention = Attention::new(&backend, config, weights)?;
-    let mut results = Vec::new();
-
-    let mut trace = Trace::default();
-    let x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
-    attention.prefill(&x, positions, &mut trace)?;
-    compare(prefill, &trace, &mut results)?;
-
-    let mut trace = Trace::default();
-    let x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
-    attention.project(&x, decode.rows, &mut trace)?;
-    compare(decode, &trace, &mut results)?;
-
-    Ok(results)
-}
-
-fn compare(fixture: &LayerFixture, trace: &Trace, results: &mut Vec<BoundaryResult>) -> Result<()> {
-    for expected in &fixture.expected {
-        let name = format!("{}_{}", fixture.name, expected.name);
-        let actual = trace.get(expected.name)?;
-        let max_abs_error = expected
-            .tolerance
-            .compare(&name, actual, &expected.values)?;
-
-        results.push(BoundaryResult {
-            name,
-            max_abs_error,
-            tolerance: expected.tolerance,
-        });
-    }
-    Ok(())
 }

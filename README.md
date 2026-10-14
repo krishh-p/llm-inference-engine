@@ -127,11 +127,12 @@ to import it into a report, and the result file records that failure.
 ## Rust layer 0 check
 
 This check runs the real model. It loads the pinned Qwen3 weights in Rust,
-widens them from bfloat16 to float32, and runs layer 0's attention on the GPU
-for the five-token fixture prompt. Every stage is compared with the golden
-fixtures: the query, key and value projections, the rotated queries and keys,
-the attention scores, the attention probabilities and the attention output.
-The single decode row is checked up to its projections.
+widens them from bfloat16 to float32, and runs all of layer 0 on the GPU for
+the five-token fixture prompt. Every stage is compared with the golden
+fixtures: both normalized inputs, the query, key and value projections, the
+rotated queries and keys, the attention scores and probabilities, the
+attention output, the MLP output and the layer output. The single decode row
+is checked up to its projections.
 
 ```bash
 make rust-verify

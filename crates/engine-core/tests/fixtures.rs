@@ -7,6 +7,7 @@ const REQUIRED_TENSORS: [(&str, &[&str]); 5] = [
     (
         "block_0.safetensors",
         &[
+            "input",
             "input_norm",
             "q",
             "k",
@@ -16,6 +17,9 @@ const REQUIRED_TENSORS: [(&str, &[&str]); 5] = [
             "scores",
             "attention_probs",
             "attention_output",
+            "mlp_input",
+            "mlp_output",
+            "output",
         ],
     ),
     ("decode_block_0.safetensors", &["input_norm", "q", "k", "v"]),
