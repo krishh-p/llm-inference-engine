@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use cuda_core::{Device, Stream};
 use cuda_kernels::{
-    add_f32, causal_softmax_f32, rms_norm_f32, rope_f32, silu_mul_f32, swap_leading_axes_f32,
+    add_f32, causal_softmax_f32, concat_rows_f32, rms_norm_f32, rope_f32, silu_mul_f32,
+    swap_leading_axes_f32,
 };
 use cutile::prelude::*;
 
@@ -283,6 +284,46 @@ impl Backend {
         let _ = swap_leading_axes_f32(output.partition([1, 1, width]), input)
             .sync_on(&self.stream)
             .map_err(cutile_error)?;
+        Ok(())
+    }
+
+    /// Joins two `[heads, rows, width]` tensors along their rows, with the
+    /// rows of `first` ahead of the rows of `second` in every head.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a tensor is on another device, the shapes do not
+    /// agree, or the kernel fails.
+    pub fn concat_rows(
+        &self,
+        output: &mut Tensor<f32>,
+        first: &Tensor<f32>,
+        second: &Tensor<f32>,
+    ) -> Result<(), BackendError> {
+        let [heads, first_rows, width] = dims("concat_rows", "first", first.shape())?;
+        let [_, second_rows, _] = dims("concat_rows", "second", second.shape())?;
+        expect_shape(
+            "concat_rows",
+            "second",
+            second.shape(),
+            &[heads, second_rows, width],
+        )?;
+        expect_shape(
+            "concat_rows",
+            "output",
+            output.shape(),
+            &[heads, first_rows + second_rows, width],
+        )?;
+        self.check_tensors(&[("first", first), ("second", second), ("output", &*output)])?;
+
+        let _ = concat_rows_f32(
+            output.partition([1, 1, width]),
+            first,
+            second,
+            first.shape()[1],
+        )
+        .sync_on(&self.stream)
+        .map_err(cutile_error)?;
         Ok(())
     }
 

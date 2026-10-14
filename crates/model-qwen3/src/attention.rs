@@ -4,6 +4,16 @@ use crate::trace::Trace;
 use crate::weights::AttentionWeights;
 use crate::{Qwen3Config, Result};
 
+/// The keys and values of every token one layer has seen.
+///
+/// Keys are stored after their norm and rotation, so a later token can use
+/// them as they are. Both tensors are `[kv_heads, len, head_dim]`.
+pub(crate) struct KvCache {
+    k: Tensor<f32>,
+    v: Tensor<f32>,
+    len: usize,
+}
+
 /// One layer's attention with its weights on the GPU.
 pub(crate) struct Attention<'a> {
     backend: &'a Backend,
@@ -49,23 +59,30 @@ impl<'a> Attention<'a> {
         })
     }
 
-    /// Runs attention over a whole prompt, where every token starts at
-    /// `positions[0]` and sees only itself and the tokens before it.
+    /// Runs attention for `rows` new tokens, which come straight after the
+    /// tokens in `cache`. Each new token sees the cached tokens, the new
+    /// tokens before it, and itself.
     ///
     /// `x` is the normalized layer input, `[rows, hidden_size]`. The result
-    /// has the same shape.
-    pub(crate) fn prefill(
+    /// has the same shape and comes with the cache extended by the new tokens.
+    pub(crate) fn forward(
         &self,
         x: &Tensor<f32>,
-        positions: &[u32],
+        rows: usize,
+        cache: Option<&KvCache>,
         trace: &mut Trace,
-    ) -> Result<Tensor<f32>> {
+    ) -> Result<(Tensor<f32>, KvCache)> {
         let backend = self.backend;
-        let rows = positions.len();
+        let cached = cache.map_or(0, |cache| cache.len);
+        let total = cached + rows;
         let (q, k, v) = self.project(x, rows, trace)?;
 
+        // positions continue from the end of the cache
+        let positions = (cached..total)
+            .map(|position| u32::try_from(position).expect("positions fit in u32"))
+            .collect::<Vec<_>>();
         let half = self.head_dim / 2;
-        let (cos, sin) = rope_tables(positions, self.head_dim, self.theta);
+        let (cos, sin) = rope_tables(&positions, self.head_dim, self.theta);
         let cos = backend.upload(&cos, &[rows, half])?;
         let sin = backend.upload(&sin, &[rows, half])?;
         let q = self.normalize_and_rotate(q, &self.q_norm, self.heads, rows, &cos, &sin)?;
@@ -73,15 +90,30 @@ impl<'a> Attention<'a> {
         trace.save(backend, "q_rope", &q)?;
         trace.save(backend, "k_rope", &k)?;
 
+        // the new keys and values go after the cached ones
+        let (k, v) = match cache {
+            Some(cache) => {
+                trace.save(backend, "cache_k_in", &cache.k)?;
+                trace.save(backend, "cache_v_in", &cache.v)?;
+                let shape = [self.kv_heads, total, self.head_dim];
+                let mut all_k = backend.zeros(&shape)?;
+                backend.concat_rows(&mut all_k, &cache.k, &k)?;
+                let mut all_v = backend.zeros(&shape)?;
+                backend.concat_rows(&mut all_v, &cache.v, &v)?;
+                (all_k, all_v)
+            }
+            None => (k, v),
+        };
+        trace.save(backend, "cache_k_out", &k)?;
+        trace.save(backend, "cache_v_out", &v)?;
+
         // rows are the new tokens, columns are the tokens they attend to
-        let mut scores = backend.zeros(&[self.heads, rows, rows])?;
+        let mut scores = backend.zeros(&[self.heads, rows, total])?;
         backend.matmul_heads_transposed(&mut scores, &q, &k, self.score_scale())?;
         trace.save(backend, "scores", &scores)?;
 
-        let first_position = positions.first().copied().unwrap_or(0);
-        let first_position = usize::try_from(first_position).expect("positions fit in usize");
-        let mut probs = backend.zeros(&[self.heads, rows, rows])?;
-        backend.causal_softmax(&mut probs, &scores, first_position)?;
+        let mut probs = backend.zeros(&[self.heads, rows, total])?;
+        backend.causal_softmax(&mut probs, &scores, cached)?;
         trace.save(backend, "attention_probs", &probs)?;
 
         // weighted sum of values, [heads, rows, head_dim]
@@ -92,11 +124,13 @@ impl<'a> Attention<'a> {
         let mut output = backend.zeros(&[rows, self.hidden_size])?;
         backend.matmul_transposed(&mut output, &merged, &self.o_proj)?;
         trace.save(backend, "attention_output", &output)?;
-        Ok(output)
+
+        let cache = KvCache { k, v, len: total };
+        Ok((output, cache))
     }
 
     /// Projects the layer input into query, key and value heads.
-    pub(crate) fn project(
+    fn project(
         &self,
         x: &Tensor<f32>,
         rows: usize,

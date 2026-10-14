@@ -22,10 +22,24 @@ const PREFILL_TENSORS: [(&str, &str); 12] = [
     ("output", "block_output"),
 ];
 const DECODE_FILE: &str = "decode_block_0.safetensors";
-const DECODE_TENSORS: [(&str, &str); 3] = [
+const DECODE_TENSORS: [(&str, &str); 16] = [
+    ("input_norm", "norm"),
     ("q", "projection"),
     ("k", "projection"),
     ("v", "projection"),
+    ("q_rope", "rope"),
+    ("k_rope", "rope"),
+    // cached keys are rotated keys, and cached values are projected values
+    ("cache_k_in", "rope"),
+    ("cache_v_in", "projection"),
+    ("cache_k_out", "rope"),
+    ("cache_v_out", "projection"),
+    ("scores", "scores"),
+    ("attention_probs", "probs"),
+    ("attention_output", "attention_output"),
+    ("mlp_input", "norm"),
+    ("mlp_output", "mlp_output"),
+    ("output", "block_output"),
 ];
 
 /// How closely one GPU tensor matched its fixture.
@@ -41,7 +55,7 @@ pub struct BoundaryResult {
 pub(crate) struct LayerFixture {
     pub name: &'static str,
     pub rows: usize,
-    /// `[rows, hidden_size]`.
+    /// The layer input, `[rows, hidden_size]`.
     pub input: Vec<f32>,
     pub expected: Vec<ExpectedTensor>,
 }
@@ -56,8 +70,8 @@ pub(crate) struct ExpectedTensor {
 /// Runs layer 0 on the GPU with the real weights and compares every recorded
 /// tensor with the golden fixtures.
 ///
-/// Prefill is checked through the whole layer. Decode is checked up to its
-/// projections.
+/// The prompt is run first, then one more token is decoded against the cache
+/// that run left behind. Both passes are checked through the whole layer.
 ///
 /// # Errors
 ///
@@ -73,14 +87,12 @@ pub fn verify_layer_0(
     manifest.validate_files(fixture_dir)?;
 
     let weights = LayerWeights::load(artifacts, 0)?;
-    // prefill starts from the layer input, decode from the normalized input
     let prefill = load_fixture(
         &manifest,
         fixture_dir,
         config,
         "prefill",
         PREFILL_FILE,
-        "input",
         &PREFILL_TENSORS,
     )?;
     let decode = load_fixture(
@@ -89,11 +101,10 @@ pub fn verify_layer_0(
         config,
         "decode",
         DECODE_FILE,
-        "input_norm",
         &DECODE_TENSORS,
     )?;
 
-    run_on_gpu(config, &weights, &manifest.positions, &prefill, &decode)
+    run_on_gpu(config, &weights, &prefill, &decode)
 }
 
 fn load_fixture(
@@ -102,11 +113,10 @@ fn load_fixture(
     config: &Qwen3Config,
     name: &'static str,
     file: &str,
-    input: &str,
     tensors: &[(&'static str, &str)],
 ) -> Result<LayerFixture> {
     let catalog = SafeTensorCatalog::open_files([fixture_dir.join(file)])?;
-    let rows = catalog.load(input)?.descriptor.layout.element_count() / config.hidden_size;
+    let rows = catalog.load("input")?.descriptor.layout.element_count() / config.hidden_size;
 
     let mut expected = Vec::with_capacity(tensors.len());
     for &(tensor, tolerance) in tensors {
@@ -120,7 +130,7 @@ fn load_fixture(
     Ok(LayerFixture {
         name,
         rows,
-        input: load_tensor(&catalog, input, &[rows, config.hidden_size])?,
+        input: load_tensor(&catalog, "input", &[rows, config.hidden_size])?,
         expected,
     })
 }
@@ -129,7 +139,6 @@ fn load_fixture(
 fn run_on_gpu(
     config: &Qwen3Config,
     weights: &LayerWeights,
-    positions: &[u32],
     prefill: &LayerFixture,
     decode: &LayerFixture,
 ) -> Result<Vec<BoundaryResult>> {
@@ -142,12 +151,13 @@ fn run_on_gpu(
 
     let mut trace = Trace::default();
     let x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
-    block.prefill(&x, positions, &mut trace)?;
+    let (_, cache) = block.forward(&x, prefill.rows, None, &mut trace)?;
     compare(prefill, &trace, &mut results)?;
 
+    // decode attends to the cache that prefill just built
     let mut trace = Trace::default();
     let x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
-    block.attention.project(&x, decode.rows, &mut trace)?;
+    block.forward(&x, decode.rows, Some(&cache), &mut trace)?;
     compare(decode, &trace, &mut results)?;
 
     Ok(results)
@@ -179,7 +189,6 @@ fn compare(
 fn run_on_gpu(
     _config: &Qwen3Config,
     _weights: &LayerWeights,
-    _positions: &[u32],
     _prefill: &LayerFixture,
     _decode: &LayerFixture,
 ) -> Result<Vec<BoundaryResult>> {

@@ -128,11 +128,12 @@ to import it into a report, and the result file records that failure.
 
 This check runs the real model. It loads the pinned Qwen3 weights in Rust,
 widens them from bfloat16 to float32, and runs all of layer 0 on the GPU for
-the five-token fixture prompt. Every stage is compared with the golden
-fixtures: both normalized inputs, the query, key and value projections, the
-rotated queries and keys, the attention scores and probabilities, the
-attention output, the MLP output and the layer output. The single decode row
-is checked up to its projections.
+the five-token fixture prompt. It then decodes one more token against the
+key and value cache that the prompt left behind. Every stage of both passes is
+compared with the golden fixtures: both normalized inputs, the query, key and
+value projections, the rotated queries and keys, the attention scores and
+probabilities, the attention output, the MLP output and the layer output. The
+decode pass also checks the cache before and after the new token is added.
 
 ```bash
 make rust-verify
