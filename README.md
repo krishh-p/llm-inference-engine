@@ -136,7 +136,7 @@ Apart from the `[4096, 2048]` fused case, every input here is about ten
 thousand elements or fewer, so those timings mostly measure launch overhead. Nsight Compute runs on Modal. Nsight Systems captures a trace but fails
 to import it into a report, and the result file records that failure.
 
-## Rust layer 0 check
+## Rust layer checks
 
 This check runs the real model. It loads the pinned Qwen3 weights in Rust,
 widens them from bfloat16 to float32, and runs all of layer 0 on the GPU for
@@ -146,6 +146,13 @@ compared with the golden fixtures: both normalized inputs, the query, key and
 value projections, the rotated queries and keys, the attention scores and
 probabilities, the attention output, the MLP output and the layer output. The
 decode pass also checks the cache before and after the new token is added.
+
+After layer 0, the same command loads all 28 layers, keeps every one on the
+GPU, and runs the prompt through them in order. The last prompt token is
+compared with the fixture after every layer, so a mismatch points to the first
+layer that went wrong. Errors grow from about `5e-7` after layer 0 to a few
+`1e-4` near the end, where hidden values reach the thousands and float32
+rounding steps are larger.
 
 ```bash
 make rust-verify

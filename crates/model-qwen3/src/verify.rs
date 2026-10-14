@@ -41,6 +41,7 @@ const DECODE_TENSORS: [(&str, &str); 16] = [
     ("mlp_output", "mlp_output"),
     ("output", "block_output"),
 ];
+const GENERATION_FILE: &str = "generation.safetensors";
 
 /// How closely one GPU tensor matched its fixture.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +108,41 @@ pub fn verify_layer_0(
     run_on_gpu(config, &weights, &prefill, &decode)
 }
 
+/// Runs the fixture prompt through every layer on the GPU and compares the
+/// last token after each layer with the golden fixtures.
+///
+/// The run starts from the prompt's embeddings recorded in the fixtures, so
+/// the stacked layers are checked on their own.
+///
+/// # Errors
+///
+/// Returns an error when a fixture or weight cannot be loaded, the GPU is
+/// unavailable, or a layer's output is outside the fixture tolerance.
+pub fn verify_layers(
+    artifacts: &Qwen3Artifacts,
+    fixture_dir: impl AsRef<Path>,
+) -> Result<Vec<BoundaryResult>> {
+    let fixture_dir = fixture_dir.as_ref();
+    let config = &artifacts.config;
+    let manifest = FixtureManifest::load(fixture_dir.join("manifest.json"))?;
+    manifest.validate_files(fixture_dir)?;
+
+    let rows = manifest.token_ids.len();
+    let prefill = SafeTensorCatalog::open_files([fixture_dir.join(PREFILL_FILE)])?;
+    let input = load_tensor(&prefill, "input", &[rows, config.hidden_size])?;
+
+    // the fixture keeps the last prompt token after each layer
+    let generation = SafeTensorCatalog::open_files([fixture_dir.join(GENERATION_FILE)])?;
+    let expected = load_tensor(
+        &generation,
+        "layer_outputs",
+        &[config.num_hidden_layers, config.hidden_size],
+    )?;
+    let tolerance = manifest.tolerance(GENERATION_FILE, "layer_output")?;
+
+    run_layers_on_gpu(artifacts, &input, rows, &expected, tolerance)
+}
+
 fn load_fixture(
     manifest: &FixtureManifest,
     fixture_dir: &Path,
@@ -149,13 +185,13 @@ fn run_on_gpu(
     let block = Block::new(&backend, config, weights)?;
     let mut results = Vec::new();
 
-    let mut trace = Trace::default();
+    let mut trace = Trace::recording();
     let x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
     let (_, cache) = block.forward(&x, prefill.rows, None, &mut trace)?;
     compare(prefill, &trace, &mut results)?;
 
     // decode attends to the cache that prefill just built
-    let mut trace = Trace::default();
+    let mut trace = Trace::recording();
     let x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
     block.forward(&x, decode.rows, Some(&cache), &mut trace)?;
     compare(decode, &trace, &mut results)?;
@@ -191,6 +227,52 @@ fn run_on_gpu(
     _weights: &LayerWeights,
     _prefill: &LayerFixture,
     _decode: &LayerFixture,
+) -> Result<Vec<BoundaryResult>> {
+    Err(cuda_backend::BackendError::CudaDisabled.into())
+}
+
+#[cfg(feature = "cuda")]
+fn run_layers_on_gpu(
+    artifacts: &Qwen3Artifacts,
+    input: &[f32],
+    rows: usize,
+    expected: &[f32],
+    tolerance: Tolerance,
+) -> Result<Vec<BoundaryResult>> {
+    use crate::model::Model;
+    use crate::trace::Trace;
+
+    let hidden_size = artifacts.config.hidden_size;
+    let backend = cuda_backend::Backend::new()?;
+    let model = Model::load(&backend, artifacts)?;
+
+    let mut trace = Trace::recording();
+    let x = backend.upload(input, &[rows, hidden_size])?;
+    model.forward(x, rows, &[], &mut trace)?;
+
+    let mut results = Vec::new();
+    for (layer, expected) in expected.chunks(hidden_size).enumerate() {
+        let name = format!("layer_{layer}_output");
+        let output = trace.get(&name)?;
+        let last_row = &output[(rows - 1) * hidden_size..];
+        let max_abs_error = tolerance.compare(&name, last_row, expected)?;
+
+        results.push(BoundaryResult {
+            name,
+            max_abs_error,
+            tolerance,
+        });
+    }
+    Ok(results)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn run_layers_on_gpu(
+    _artifacts: &Qwen3Artifacts,
+    _input: &[f32],
+    _rows: usize,
+    _expected: &[f32],
+    _tolerance: Tolerance,
 ) -> Result<Vec<BoundaryResult>> {
     Err(cuda_backend::BackendError::CudaDisabled.into())
 }

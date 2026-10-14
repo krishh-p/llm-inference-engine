@@ -4,26 +4,45 @@ use crate::{ModelError, Result};
 
 /// Host copies of the tensors a forward pass produced, saved by name so they
 /// can be compared with the reference's trace.
-#[derive(Default)]
+///
+/// A trace made with [`Trace::off`] saves nothing, so a normal run does not
+/// copy its tensors back to the host.
 pub(crate) struct Trace {
-    tensors: Vec<(&'static str, Vec<f32>)>,
+    recording: bool,
+    tensors: Vec<(String, Vec<f32>)>,
 }
 
 impl Trace {
+    pub(crate) fn recording() -> Self {
+        Self {
+            recording: true,
+            tensors: Vec::new(),
+        }
+    }
+
+    pub(crate) fn off() -> Self {
+        Self {
+            recording: false,
+            tensors: Vec::new(),
+        }
+    }
+
     pub(crate) fn save(
         &mut self,
         backend: &Backend,
-        name: &'static str,
+        name: impl Into<String>,
         tensor: &Tensor<f32>,
     ) -> Result<()> {
-        self.tensors.push((name, backend.download(tensor)?));
+        if self.recording {
+            self.tensors.push((name.into(), backend.download(tensor)?));
+        }
         Ok(())
     }
 
     pub(crate) fn get(&self, name: &str) -> Result<&[f32]> {
         self.tensors
             .iter()
-            .find(|(saved, _)| *saved == name)
+            .find(|(saved, _)| saved == name)
             .map(|(_, values)| values.as_slice())
             .ok_or_else(|| ModelError::MissingTensor(name.to_owned()))
     }
