@@ -48,7 +48,8 @@ pub(crate) fn check_row_range(
     rows: usize,
     available: usize,
 ) -> Result<(), BackendError> {
-    if rows == 0 || first + rows > available {
+    // written so it cannot overflow, since this guards a raw memory copy
+    if rows == 0 || first > available || rows > available - first {
         return Err(BackendError::RowRange {
             name,
             first,
@@ -74,9 +75,16 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "copy_rows input rows 4..6 do not fit in 5 rows"
+            "copy_rows input needs 2 rows from row 4, but has 5 rows"
         );
         assert!(check_row_range("input", 0, 0, 5).is_err());
+    }
+
+    #[test]
+    fn rejects_ranges_that_would_overflow() {
+        assert!(check_row_range("input", usize::MAX, 1, 5).is_err());
+        assert!(check_row_range("input", 1, usize::MAX, 5).is_err());
+        assert!(check_row_range("input", usize::MAX, usize::MAX, usize::MAX).is_err());
     }
 
     #[test]

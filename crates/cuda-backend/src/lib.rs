@@ -195,7 +195,7 @@ pub enum BackendError {
         actual: Vec<i32>,
     },
 
-    #[error("copy_rows {name} rows {first}..{} do not fit in {available} rows", .first + .rows)]
+    #[error("copy_rows {name} needs {rows} rows from row {first}, but has {available} rows")]
     RowRange {
         name: &'static str,
         first: usize,
