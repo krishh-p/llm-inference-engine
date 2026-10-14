@@ -236,22 +236,6 @@ host time per token after its logits arrive, and the most device memory in
 use. The GPU, driver, CUDA and Rust versions and the git commit go in too.
 Median and p95 use the nearest-rank method in both engines.
 
-One float32 run of each on an L4, 20 tokens from the default prompt
-(October 2026):
-
-| | Rust | Hugging Face |
-| --- | ---: | ---: |
-| Model load | 11.7 s | 3.8 s |
-| Time to first token | 55 ms | 46 ms |
-| Decode step, median | 51.1 ms | 41.9 ms |
-| Decode tokens per second | 19.6 | 23.8 |
-| Device memory in use | 6.64 GiB | 6.68 GiB |
-
-The Rust engine is slower so far. It widens every weight to float32 on the CPU
-before uploading it, and the host waits for every GPU call to finish before it
-starts the next one.
-Finding where the decode time goes is the next step.
-
 ## Cost and cache
 See [Modal pricing](https://modal.com/pricing).
 
