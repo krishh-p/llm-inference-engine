@@ -40,8 +40,7 @@ impl Trace {
     }
 
     /// Saves one layer's output as `layer_{layer}_output`. The name is only
-    /// built while recording, so a decode step with tracing off allocates
-    /// nothing here.
+    /// built when recording, so decode with tracing off doesn't allocate
     pub(crate) fn save_layer_output(
         &mut self,
         backend: &Backend,

@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use engine_core::FixtureManifest;
 use model_qwen3::{
-    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, verify_generation,
+    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, complete, verify_generation,
     verify_layer_0, verify_model,
 };
 use thiserror::Error;
@@ -58,6 +58,37 @@ enum Command {
         #[arg(long, default_value = "tests/prompts.json")]
         prompts: PathBuf,
     },
+
+    /// Load the model on the GPU and greedily complete a prompt.
+    Generate {
+        /// Directory containing config.json, tokenizer.json and `SafeTensors` weights.
+        #[arg(long)]
+        model_dir: PathBuf,
+
+        /// Text to complete.
+        #[arg(long)]
+        prompt: String,
+
+        /// Most tokens to generate. Generation also stops at the end-of-sequence token.
+        #[arg(long, default_value_t = 20)]
+        max_new_tokens: usize,
+
+        /// Seed for sampling. Greedy decoding always picks the most likely
+        /// token, so the seed is recorded but does not change the output.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+
+        /// Precision of the weights and activations on the GPU.
+        #[arg(long, value_enum, default_value_t = Dtype::Float32)]
+        dtype: Dtype,
+    },
+}
+
+/// The precisions the engine can run in. Weights are stored in bfloat16 and
+/// widened to float32 when they are loaded.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Dtype {
+    Float32,
 }
 
 #[derive(Debug, Error)]
@@ -111,6 +142,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
             fixtures,
             prompts,
         } => verify(&model_dir, &fixtures, &prompts),
+        Command::Generate {
+            model_dir,
+            prompt,
+            max_new_tokens,
+            seed,
+            dtype,
+        } => generate(&model_dir, &prompt, max_new_tokens, seed, dtype),
     }
 }
 
@@ -204,12 +242,39 @@ fn verify(model_dir: &Path, fixture_dir: &Path, prompts_path: &Path) -> Result<(
     Ok(())
 }
 
+fn generate(
+    model_dir: &Path,
+    prompt: &str,
+    max_new_tokens: usize,
+    seed: u64,
+    dtype: Dtype,
+) -> Result<(), CliError> {
+    let artifacts = Qwen3Artifacts::open(model_dir)?;
+    let completion = complete(&artifacts, prompt, max_new_tokens)?;
+
+    println!("prompt: {prompt:?}");
+    println!("prompt_token_ids: {:?}", completion.prompt_ids);
+    println!("dtype: {}", dtype.name());
+    println!("seed: {seed} (greedy decoding does not use it)");
+    println!("token_ids: {:?}", completion.token_ids);
+    println!("completion: {:?}", completion.text);
+    Ok(())
+}
+
 fn print_results(results: &[BoundaryResult]) {
     for result in results {
         println!(
             "{}: max_abs_error={}, atol={}, rtol={}",
             result.name, result.max_abs_error, result.tolerance.atol, result.tolerance.rtol
         );
+    }
+}
+
+impl Dtype {
+    fn name(self) -> &'static str {
+        match self {
+            Dtype::Float32 => "float32",
+        }
     }
 }
 

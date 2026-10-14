@@ -201,6 +201,26 @@ prints the largest error at each stage. The allowed error is
 `atol + rtol * |expected|`, with one pair per stage recorded in the fixture
 manifest.
 
+## Rust generation
+
+Generate from any prompt with the Rust engine. Modal is launched from Python,
+but there is no Python in the inference path:
+
+```bash
+make rust-generate
+```
+
+It uses the same `PROMPT` and `MAX_NEW_TOKENS` settings as `make manual`, for
+example `make rust-generate PROMPT="2 + 2 =" MAX_NEW_TOKENS=8`. The default run
+produces the same 20 tokens as the Python reference and Hugging Face.
+
+The command prints the prompt and generated token IDs and the completion. The
+make target only passes the prompt and token limit. The underlying
+`qwen3-cli generate` command also takes `--seed` and `--dtype`. Decoding is
+greedy, so the seed is recorded but does not change the output, and `float32`
+is the only dtype so far. A request that is empty or does not fit in the
+32,768-position context fails before the model is loaded.
+
 ## Cost and cache
 See [Modal pricing](https://modal.com/pricing).
 

@@ -1,9 +1,76 @@
-use crate::{ModelError, Result};
+use crate::{ModelError, Qwen3Artifacts, Result};
+
+/// One prompt's greedy completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    pub prompt_ids: Vec<u32>,
+    /// The generated tokens, ending with the end-of-sequence token if one
+    /// stopped generation.
+    pub token_ids: Vec<u32>,
+    /// The generated tokens as text, without special tokens.
+    pub text: String,
+}
+
+/// Loads the model on the GPU and greedily completes `prompt`.
+///
+/// Generation stops at the end-of-sequence token or after `max_new_tokens`.
+/// The request is checked before the model is loaded, so a prompt that is
+/// empty or too long fails straight away.
+///
+/// # Errors
+///
+/// Returns an error when the prompt cannot be tokenized, the request does not
+/// fit in the context window, a weight cannot be loaded, or the GPU is
+/// unavailable.
+pub fn complete(
+    artifacts: &Qwen3Artifacts,
+    prompt: &str,
+    max_new_tokens: usize,
+) -> Result<Completion> {
+    let config = &artifacts.config;
+    let prompt_ids = artifacts.tokenizer.encode(prompt)?;
+    check_request(
+        prompt_ids.len(),
+        max_new_tokens,
+        config.max_position_embeddings,
+    )?;
+
+    let token_ids = complete_on_gpu(artifacts, &prompt_ids, max_new_tokens)?;
+    let text = artifacts.tokenizer.decode(&token_ids)?;
+    Ok(Completion {
+        prompt_ids,
+        token_ids,
+        text,
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn complete_on_gpu(
+    artifacts: &Qwen3Artifacts,
+    prompt_ids: &[u32],
+    max_new_tokens: usize,
+) -> Result<Vec<u32>> {
+    use crate::model::Model;
+
+    let backend = cuda_backend::Backend::new()?;
+    let model = Model::load(&backend, artifacts)?;
+    let eos_ids = [artifacts.config.eos_token_id];
+    let generated = generate(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
+    Ok(generated.token_ids)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn complete_on_gpu(
+    _artifacts: &Qwen3Artifacts,
+    _prompt_ids: &[u32],
+    _max_new_tokens: usize,
+) -> Result<Vec<u32>> {
+    Err(cuda_backend::BackendError::CudaDisabled.into())
+}
 
 /// Checks a generation request before any GPU work.
 ///
 /// The prompt and every new token must fit in the model's context window.
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn check_request(
     prompt_tokens: usize,
     max_new_tokens: usize,
@@ -62,8 +129,8 @@ mod gpu {
     /// The tokens one greedy generation produced.
     pub(crate) struct Generated {
         pub token_ids: Vec<u32>,
-        /// Buffers the backend allocated during the decode steps, which
-        /// should be none, since every step reuses the same workspace.
+        /// Buffers allocated while decoding. Should be 0, since every step
+        /// reuses the same workspace
         pub decode_allocations: usize,
     }
 
@@ -117,8 +184,7 @@ mod gpu {
     /// Greedily generates like [`generate`], but runs the whole sequence again
     /// for every new token instead of keeping caches.
     ///
-    /// This repeats almost all of the work at every step, so it is only used
-    /// to check that the cached path picks the same tokens.
+    /// Much slower, and only here to check the cached path against.
     pub(crate) fn generate_uncached(
         model: &Model,
         prompt_ids: &[u32],

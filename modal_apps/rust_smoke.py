@@ -253,17 +253,7 @@ def run_on_gpu() -> dict[str, object]:
     timeout=1200,
 )
 def verify_on_gpu() -> str:
-    from huggingface_hub import snapshot_download
-
-    revision_path = Path(REMOTE_ROOT) / "model_revision.txt"
-    revision = revision_path.read_text(encoding="utf-8").strip()
-
-    # reuses the snapshot in the volume, and downloads it if it is not there yet
-    model_dir = snapshot_download(
-        modal_common.MODEL_NAME,
-        revision=revision,
-        allow_patterns=["config.json", "tokenizer.json", "*.safetensors"],
-    )
+    model_dir = download_model()
 
     binary = f"{REMOTE_ROOT}/target/release/qwen3-cli"
     outputs = []
@@ -284,6 +274,53 @@ def verify_on_gpu() -> str:
         outputs.append(completed.stdout.strip())
 
     return "\n".join(outputs)
+
+
+@app.function(
+    image=image,
+    gpu="L4",
+    volumes={modal_common.HF_CACHE_PATH: hf_cache},
+    timeout=1200,
+)
+def generate_on_gpu(prompt: str, max_new_tokens: int) -> str:
+    model_dir = download_model()
+
+    completed = subprocess.run(
+        [
+            f"{REMOTE_ROOT}/target/release/qwen3-cli",
+            "generate",
+            "--model-dir",
+            model_dir,
+            "--prompt",
+            prompt,
+            "--max-new-tokens",
+            str(max_new_tokens),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "qwen3-cli generate failed\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+    return completed.stdout.strip()
+
+
+def download_model() -> str:
+    from huggingface_hub import snapshot_download
+
+    revision_path = Path(REMOTE_ROOT) / "model_revision.txt"
+    revision = revision_path.read_text(encoding="utf-8").strip()
+
+    # reuses the snapshot in the volume, and downloads it if it is not there yet
+    return snapshot_download(
+        modal_common.MODEL_NAME,
+        revision=revision,
+        allow_patterns=["config.json", "tokenizer.json", "*.safetensors"],
+    )
 
 
 @app.function(image=pytorch_image, gpu="L4", timeout=600)
@@ -439,3 +476,8 @@ def main() -> None:
 @app.local_entrypoint()
 def run_verify() -> None:
     print(verify_on_gpu.remote())
+
+
+@app.local_entrypoint()
+def run_generate(prompt: str, max_new_tokens: int) -> None:
+    print(generate_on_gpu.remote(prompt, max_new_tokens))

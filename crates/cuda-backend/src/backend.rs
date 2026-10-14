@@ -544,8 +544,7 @@ impl Backend {
 
         let row_bytes = width * size_of::<f32>();
         self.device.bind_to_thread().map_err(cuda_error)?;
-        // each head is one contiguous block in both tensors, but the output
-        // heads are further apart, so every head is its own copy
+        // output heads are `capacity` rows apart, so each head is its own copy
         for head in 0..heads {
             let output_offset = (head * capacity + first_row) * row_bytes;
             let input_offset = head * rows * row_bytes;
@@ -571,8 +570,8 @@ impl Backend {
     ///
     /// Row `r` belongs to the token at `first_position + r` and column `c` to
     /// the token at position `c`. A token sees itself and earlier tokens only.
-    /// Scores may be wider than the tokens they hold, as when they are sized
-    /// for a whole KV cache, and every column past a row's token comes out 0.
+    /// Scores can be wider than the tokens they hold (sized for the whole KV
+    /// cache, say). Columns past a row's token just come out as 0.
     ///
     /// # Errors
     ///
@@ -608,8 +607,8 @@ impl Backend {
             actual: scores.shape().to_vec(),
         })?;
 
-        // Columns past the newest token, whether unused cache columns or
-        // padding up to the tile width, are hidden by the causal mask.
+        // the causal mask also hides unused cache columns and the padding
+        // up to the tile width
         let _ = causal_softmax_f32(
             output.partition([1, 1, cols.next_power_of_two()]),
             scores,

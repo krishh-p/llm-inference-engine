@@ -42,8 +42,8 @@ const DECODE_TENSORS: [(&str, &str); 16] = [
     ("output", "block_output"),
 ];
 const GENERATION_FILE: &str = "generation.safetensors";
-// The checks give every cache rows that no token fills. They start as NaN, so
-// reading one by mistake fails the comparisons.
+// spare cache rows that never get written. they start as NaN, so reading one
+// by mistake fails the checks
 #[cfg(feature = "cuda")]
 const SPARE_CACHE_ROWS: usize = 3;
 

@@ -124,8 +124,8 @@ pub(crate) fn plan_attention_scores(
         ..
     } = shapes;
 
-    // cuBLAS's A is the keys, read transposed, and its B is the queries.
-    // A row of scores is `capacity` wide, of which the first `keys` are written.
+    // A = keys (transposed), B = queries. score rows are `capacity` wide
+    // but only the first `keys` get written
     let call = GemmCall {
         transpose_a: true,
         m: keys,
@@ -169,8 +169,8 @@ pub(crate) fn plan_attention_mix(
         ..
     } = shapes;
 
-    // cuBLAS's A is the values and its B is the probabilities, whose rows
-    // are `capacity` wide although only the first `keys` are read.
+    // A = values, B = probs. prob rows are `capacity` wide, only the first
+    // `keys` are read
     let call = GemmCall {
         transpose_a: false,
         m: head_dim,

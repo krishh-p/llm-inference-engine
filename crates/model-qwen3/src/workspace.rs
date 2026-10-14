@@ -2,13 +2,12 @@ use cuda_backend::{Backend, Tensor, rope_tables};
 
 use crate::{ModelError, Qwen3Config, Result};
 
-/// Every tensor one forward pass writes, allocated once for a fixed number
-/// of new tokens and a fixed cache capacity.
+/// Every tensor a forward pass writes, allocated once for a fixed number of
+/// new tokens and a fixed cache capacity.
 ///
-/// Prefill and decode each get their own workspace. Prefill's is sized for
-/// the whole prompt and used once. Decode's is sized for one token and reused
-/// for every step, so the token loop allocates nothing. The layers run one
-/// after another, so they all share the same buffers.
+/// Prefill gets one sized for the prompt. Decode gets one sized for a single
+/// token and reuses it every step, so the token loop doesn't allocate. Layers
+/// run one at a time, so they all share the same buffers.
 pub(crate) struct Workspace {
     /// How many new tokens each forward pass runs.
     pub rows: usize,

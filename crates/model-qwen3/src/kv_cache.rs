@@ -50,11 +50,8 @@ mod gpu {
             })
         }
 
-        /// An empty cache whose rows all start as NaN.
-        ///
-        /// The checks use this so that reading a row no token has written
-        /// spreads NaN into every result that depends on it, instead of
-        /// quietly reading zeros.
+        /// An empty cache filled with NaN, used by the checks. Reading a row
+        /// nothing wrote then shows up as NaN instead of quietly reading zeros
         pub(crate) fn filled_with_nan(
             backend: &Backend,
             config: &Qwen3Config,
