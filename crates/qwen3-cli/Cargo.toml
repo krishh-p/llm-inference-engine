@@ -11,6 +11,7 @@ cuda = ["model-qwen3/cuda"]
 clap.workspace = true
 engine-core = { path = "../engine-core" }
 model-qwen3 = { path = "../model-qwen3" }
+serde_json.workspace = true
 thiserror.workspace = true
 
 [lints]

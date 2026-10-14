@@ -23,6 +23,11 @@ make dev
 
 Expect GPU, CUDA, PyTorch, and model-completion details followed by `Smoke test passed`.
 
+This is also the Hugging Face baseline. After one warmup run it times the
+first token and every decode step, and writes them to `results/smoke-*.json`
+under the same field names the Rust engine uses. It loads the model in
+bfloat16 by default. Use `make dev DTYPE=float32` to match the Rust engine.
+
 Run the manual Qwen3 reference and compare it with Hugging Face:
 
 ```bash
@@ -220,6 +225,30 @@ make target only passes the prompt and token limit. The underlying
 greedy, so the seed is recorded but does not change the output, and `float32`
 is the only dtype so far. A request that is empty or does not fit in the
 32,768-position context fails before the model is loaded.
+
+Each run also writes `results/rust-generate-*.json`. It records the model
+load time, one unmeasured warmup run (the first run also compiles every GPU
+kernel, which shows up as a slow cold first token), then prefill time, time to
+first token, the median and p95 decode step, decode tokens per second, the
+host time per token after its logits arrive, and the most device memory in
+use. The GPU, driver, CUDA and Rust versions and the git commit go in too.
+Median and p95 use the nearest-rank method in both engines.
+
+One float32 run of each on an L4, 20 tokens from the default prompt
+(October 2026):
+
+| | Rust | Hugging Face |
+| --- | ---: | ---: |
+| Model load | 11.7 s | 3.8 s |
+| Time to first token | 55 ms | 46 ms |
+| Decode step, median | 51.1 ms | 41.9 ms |
+| Decode tokens per second | 19.6 | 23.8 |
+| Device memory in use | 6.64 GiB | 6.68 GiB |
+
+The Rust engine is slower so far. It widens every weight to float32 on the CPU
+before uploading it, and the host waits for every GPU call to finish before it
+starts the next one.
+Finding where the decode time goes is the next step.
 
 ## Cost and cache
 See [Modal pricing](https://modal.com/pricing).

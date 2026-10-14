@@ -1,7 +1,7 @@
 use crate::{ModelError, Qwen3Artifacts, Result};
 
 /// One prompt's greedy completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Completion {
     pub prompt_ids: Vec<u32>,
     /// The generated tokens, ending with the end-of-sequence token if one
@@ -9,13 +9,45 @@ pub struct Completion {
     pub token_ids: Vec<u32>,
     /// The generated tokens as text, without special tokens.
     pub text: String,
+    pub metrics: Metrics,
+}
+
+/// How long each part of a completion took, and how much device memory it used.
+///
+/// Times are host wall-clock seconds. Every GPU call waits for its work to
+/// finish, so they include the GPU time too.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Metrics {
+    /// Opening the GPU, widening every weight to float32 and uploading it.
+    pub model_load_seconds: f64,
+    /// Generations run before the measured one.
+    pub warmup_runs: usize,
+    /// Time to first token of the first warmup run, which also compiles
+    /// every GPU kernel. `None` without warmup runs.
+    pub cold_time_to_first_token_seconds: Option<f64>,
+    /// Running the prompt through the model, up to its logits on the host.
+    pub prefill_seconds: f64,
+    /// From the start of generation to the first new token, including
+    /// allocating the caches.
+    pub time_to_first_token_seconds: f64,
+    /// Each decode step, from passing in a token to having the next one.
+    pub decode_step_seconds: Vec<f64>,
+    /// The part of each decode step spent on the host after the logits
+    /// arrive, picking the next token.
+    pub host_seconds: Vec<f64>,
+    /// From the start of generation to the last new token.
+    pub generation_seconds: f64,
+    /// The most device memory in use at the points it was sampled, in bytes.
+    pub peak_memory_used_bytes: usize,
+    pub memory_total_bytes: usize,
 }
 
 /// Loads the model on the GPU and greedily completes `prompt`.
 ///
 /// Generation stops at the end-of-sequence token or after `max_new_tokens`.
-/// The request is checked before the model is loaded, so a prompt that is
-/// empty or too long fails straight away.
+/// `warmup_runs` complete the prompt first without being measured, since the
+/// first run also compiles the GPU kernels. The request is checked before the
+/// model is loaded, so a prompt that is empty or too long fails straight away.
 ///
 /// # Errors
 ///
@@ -26,6 +58,7 @@ pub fn complete(
     artifacts: &Qwen3Artifacts,
     prompt: &str,
     max_new_tokens: usize,
+    warmup_runs: usize,
 ) -> Result<Completion> {
     let config = &artifacts.config;
     let prompt_ids = artifacts.tokenizer.encode(prompt)?;
@@ -35,12 +68,14 @@ pub fn complete(
         config.max_position_embeddings,
     )?;
 
-    let token_ids = complete_on_gpu(artifacts, &prompt_ids, max_new_tokens)?;
+    let (token_ids, metrics) =
+        complete_on_gpu(artifacts, &prompt_ids, max_new_tokens, warmup_runs)?;
     let text = artifacts.tokenizer.decode(&token_ids)?;
     Ok(Completion {
         prompt_ids,
         token_ids,
         text,
+        metrics,
     })
 }
 
@@ -49,14 +84,38 @@ fn complete_on_gpu(
     artifacts: &Qwen3Artifacts,
     prompt_ids: &[u32],
     max_new_tokens: usize,
-) -> Result<Vec<u32>> {
+    warmup_runs: usize,
+) -> Result<(Vec<u32>, Metrics)> {
+    use std::time::Instant;
+
     use crate::model::Model;
 
+    let load_started = Instant::now();
     let backend = cuda_backend::Backend::new()?;
     let model = Model::load(&backend, artifacts)?;
+    let model_load_seconds = load_started.elapsed().as_secs_f64();
+
     let eos_ids = [artifacts.config.eos_token_id];
+    let mut cold_time_to_first_token_seconds = None;
+    for _ in 0..warmup_runs {
+        let warmup = generate(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
+        cold_time_to_first_token_seconds.get_or_insert(warmup.time_to_first_token_seconds);
+    }
+
     let generated = generate(&backend, &model, prompt_ids, max_new_tokens, &eos_ids)?;
-    Ok(generated.token_ids)
+    let metrics = Metrics {
+        model_load_seconds,
+        warmup_runs,
+        cold_time_to_first_token_seconds,
+        prefill_seconds: generated.prefill_seconds,
+        time_to_first_token_seconds: generated.time_to_first_token_seconds,
+        decode_step_seconds: generated.decode_step_seconds,
+        host_seconds: generated.host_seconds,
+        generation_seconds: generated.generation_seconds,
+        peak_memory_used_bytes: generated.peak_memory_used_bytes,
+        memory_total_bytes: generated.memory_total_bytes,
+    };
+    Ok((generated.token_ids, metrics))
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -64,7 +123,8 @@ fn complete_on_gpu(
     _artifacts: &Qwen3Artifacts,
     _prompt_ids: &[u32],
     _max_new_tokens: usize,
-) -> Result<Vec<u32>> {
+    _warmup_runs: usize,
+) -> Result<(Vec<u32>, Metrics)> {
     Err(cuda_backend::BackendError::CudaDisabled.into())
 }
 
@@ -119,6 +179,8 @@ pub(crate) use gpu::{generate, generate_uncached};
 
 #[cfg(feature = "cuda")]
 mod gpu {
+    use std::time::Instant;
+
     use cuda_backend::Backend;
 
     use super::{argmax, check_request, is_finished};
@@ -126,12 +188,20 @@ mod gpu {
     use crate::model::Model;
     use crate::trace::Trace;
 
-    /// The tokens one greedy generation produced.
+    /// The tokens one greedy generation produced, and how long it took.
+    /// See [`Metrics`](super::Metrics) for what each time covers.
     pub(crate) struct Generated {
         pub token_ids: Vec<u32>,
         /// Buffers allocated while decoding. Should be 0, since every step
         /// reuses the same workspace
         pub decode_allocations: usize,
+        pub prefill_seconds: f64,
+        pub time_to_first_token_seconds: f64,
+        pub decode_step_seconds: Vec<f64>,
+        pub host_seconds: Vec<f64>,
+        pub generation_seconds: f64,
+        pub peak_memory_used_bytes: usize,
+        pub memory_total_bytes: usize,
     }
 
     /// Greedily generates up to `max_new_tokens` tokens after the prompt.
@@ -147,6 +217,7 @@ mod gpu {
         eos_ids: &[u32],
     ) -> Result<Generated> {
         check_request(prompt_ids.len(), max_new_tokens, model.max_positions())?;
+        let started = Instant::now();
 
         // the caches are allocated once, with room for the whole sequence
         let capacity = prompt_ids.len() + max_new_tokens;
@@ -154,31 +225,55 @@ mod gpu {
 
         // prefill's workspace is sized for the whole prompt and used once
         let mut prefill_workspace = model.new_workspace(prompt_ids.len(), capacity)?;
+        let prefill_started = Instant::now();
         let logits = model.prefill(
             prompt_ids,
             &mut caches,
             &mut prefill_workspace,
             &mut Trace::off(),
         )?;
+        let prefill_seconds = prefill_started.elapsed().as_secs_f64();
         let mut token_id = argmax(logits);
+        let time_to_first_token_seconds = started.elapsed().as_secs_f64();
+        // sampled while the prefill workspace still exists, when memory is highest
+        let (memory_after_prefill, memory_total_bytes) = backend.memory_in_use()?;
         drop(prefill_workspace);
 
         // decode's is sized for one token and reused for every step
         let mut workspace = model.new_workspace(1, capacity)?;
         let mut generated = Vec::with_capacity(max_new_tokens);
+        // sized up front too, so timing the steps doesn't allocate
+        let mut decode_step_seconds = Vec::with_capacity(max_new_tokens);
+        let mut host_seconds = Vec::with_capacity(max_new_tokens);
         let allocations_before = backend.allocations();
         loop {
             generated.push(token_id);
             if is_finished(&generated, max_new_tokens, eos_ids) {
-                return Ok(Generated {
-                    token_ids: generated,
-                    decode_allocations: backend.allocations() - allocations_before,
-                });
+                break;
             }
+            let step_started = Instant::now();
             let logits =
                 model.decode_step(token_id, &mut caches, &mut workspace, &mut Trace::off())?;
+            let logits_arrived = Instant::now();
             token_id = argmax(logits);
+            decode_step_seconds.push(step_started.elapsed().as_secs_f64());
+            host_seconds.push(logits_arrived.elapsed().as_secs_f64());
         }
+        let generation_seconds = started.elapsed().as_secs_f64();
+        let decode_allocations = backend.allocations() - allocations_before;
+        let (memory_at_end, _) = backend.memory_in_use()?;
+
+        Ok(Generated {
+            token_ids: generated,
+            decode_allocations,
+            prefill_seconds,
+            time_to_first_token_seconds,
+            decode_step_seconds,
+            host_seconds,
+            generation_seconds,
+            peak_memory_used_bytes: memory_after_prefill.max(memory_at_end),
+            memory_total_bytes,
+        })
     }
 
     /// Greedily generates like [`generate`], but runs the whole sequence again

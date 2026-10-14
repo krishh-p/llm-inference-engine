@@ -282,8 +282,9 @@ def verify_on_gpu() -> str:
     volumes={modal_common.HF_CACHE_PATH: hf_cache},
     timeout=1200,
 )
-def generate_on_gpu(prompt: str, max_new_tokens: int) -> str:
+def generate_on_gpu(prompt: str, max_new_tokens: int) -> dict[str, object]:
     model_dir = download_model()
+    metrics_path = Path("/tmp/rust-generate.json")
 
     completed = subprocess.run(
         [
@@ -295,6 +296,8 @@ def generate_on_gpu(prompt: str, max_new_tokens: int) -> str:
             prompt,
             "--max-new-tokens",
             str(max_new_tokens),
+            "--metrics-json",
+            str(metrics_path),
         ],
         check=False,
         capture_output=True,
@@ -306,19 +309,38 @@ def generate_on_gpu(prompt: str, max_new_tokens: int) -> str:
             f"stdout:\n{completed.stdout}\n"
             f"stderr:\n{completed.stderr}"
         )
-    return completed.stdout.strip()
+
+    gpu_name, driver, compute_capability = run_command(
+        "nvidia-smi",
+        "--query-gpu=name,driver_version,compute_cap",
+        "--format=csv,noheader",
+    ).split(", ")
+    result = {
+        "model": modal_common.MODEL_NAME,
+        "model_revision": model_revision(),
+        "gpu": gpu_name,
+        "compute_capability": compute_capability,
+        "driver": driver,
+        "cuda": run_command("nvcc", "--version").splitlines()[-1],
+        "rustc": run_command("rustc", "--version"),
+    }
+    result.update(json.loads(metrics_path.read_text(encoding="utf-8")))
+    result["stdout"] = completed.stdout.strip()
+    return result
+
+
+def model_revision() -> str:
+    revision_path = Path(REMOTE_ROOT) / "model_revision.txt"
+    return revision_path.read_text(encoding="utf-8").strip()
 
 
 def download_model() -> str:
     from huggingface_hub import snapshot_download
 
-    revision_path = Path(REMOTE_ROOT) / "model_revision.txt"
-    revision = revision_path.read_text(encoding="utf-8").strip()
-
     # reuses the snapshot in the volume, and downloads it if it is not there yet
     return snapshot_download(
         modal_common.MODEL_NAME,
-        revision=revision,
+        revision=model_revision(),
         allow_patterns=["config.json", "tokenizer.json", "*.safetensors"],
     )
 
@@ -480,4 +502,19 @@ def run_verify() -> None:
 
 @app.local_entrypoint()
 def run_generate(prompt: str, max_new_tokens: int) -> None:
-    print(generate_on_gpu.remote(prompt, max_new_tokens))
+    result = generate_on_gpu.remote(prompt, max_new_tokens)
+    print(result.pop("stdout"))
+
+    commit, dirty = git_metadata()
+    completed_at = datetime.now(UTC)
+    result["git_commit"] = commit
+    result["git_dirty"] = dirty
+    result["completed_at_utc"] = completed_at.isoformat()
+
+    results_dir = PROJECT_ROOT / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    output_path = results_dir / completed_at.strftime(
+        "rust-generate-%Y%m%dT%H%M%SZ.json"
+    )
+    output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"result_json: {output_path}")

@@ -1,3 +1,5 @@
+mod metrics;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -81,6 +83,15 @@ enum Command {
         /// Precision of the weights and activations on the GPU.
         #[arg(long, value_enum, default_value_t = Dtype::Float32)]
         dtype: Dtype,
+
+        /// Unmeasured runs before the measured one. The first run also
+        /// compiles the GPU kernels.
+        #[arg(long, default_value_t = 1)]
+        warmup_runs: usize,
+
+        /// Write the run's timings and memory use to this JSON file.
+        #[arg(long)]
+        metrics_json: Option<PathBuf>,
     },
 }
 
@@ -101,6 +112,13 @@ enum CliError {
 
     #[error("failed to read {path}: {source}")]
     Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to write {path}: {source}")]
+    Write {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -148,7 +166,17 @@ fn run(cli: Cli) -> Result<(), CliError> {
             max_new_tokens,
             seed,
             dtype,
-        } => generate(&model_dir, &prompt, max_new_tokens, seed, dtype),
+            warmup_runs,
+            metrics_json,
+        } => generate(
+            &model_dir,
+            &prompt,
+            max_new_tokens,
+            seed,
+            dtype,
+            warmup_runs,
+            metrics_json.as_deref(),
+        ),
     }
 }
 
@@ -248,9 +276,12 @@ fn generate(
     max_new_tokens: usize,
     seed: u64,
     dtype: Dtype,
+    warmup_runs: usize,
+    metrics_path: Option<&Path>,
 ) -> Result<(), CliError> {
     let artifacts = Qwen3Artifacts::open(model_dir)?;
-    let completion = complete(&artifacts, prompt, max_new_tokens)?;
+    let completion = complete(&artifacts, prompt, max_new_tokens, warmup_runs)?;
+    let run = metrics::run_json(prompt, &completion, seed, dtype.name());
 
     println!("prompt: {prompt:?}");
     println!("prompt_token_ids: {:?}", completion.prompt_ids);
@@ -258,6 +289,25 @@ fn generate(
     println!("seed: {seed} (greedy decoding does not use it)");
     println!("token_ids: {:?}", completion.token_ids);
     println!("completion: {:?}", completion.text);
+    for field in [
+        "model_load_seconds",
+        "cold_time_to_first_token_seconds",
+        "time_to_first_token_seconds",
+        "decode_step_median_ms",
+        "decode_step_p95_ms",
+        "decode_tokens_per_second",
+        "gpu_memory_used_gib",
+    ] {
+        println!("{field}: {}", run[field]);
+    }
+
+    if let Some(path) = metrics_path {
+        let text = serde_json::to_string_pretty(&run).expect("a JSON value always serializes");
+        std::fs::write(path, text + "\n").map_err(|source| CliError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
     Ok(())
 }
 

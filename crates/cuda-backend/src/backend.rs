@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cuda_core::{Device, Event, Stream};
+use cuda_core::{Device, Event, IntoResult, Stream};
 use cuda_kernels::{
     add_f32, add_rms_norm_f32, causal_softmax_f32, merge_heads_f32, rms_norm_f32,
     rms_norm_heads_f32, rope_f32, silu_mul_f32, split_heads_f32,
@@ -54,6 +54,26 @@ impl Backend {
     /// whether the work in between allocated anything.
     pub fn allocations(&self) -> usize {
         self.allocations.load(Ordering::Relaxed)
+    }
+
+    /// Device memory in use and in total, in bytes, as the driver reports it.
+    ///
+    /// This counts everything on the device, including memory that CUDA,
+    /// cuBLAS and other processes hold, not just this backend's tensors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the driver cannot be asked.
+    #[allow(unsafe_code)]
+    pub fn memory_in_use(&self) -> Result<(usize, usize), BackendError> {
+        self.device.bind_to_thread().map_err(cuda_error)?;
+        let mut free = 0;
+        let mut total = 0;
+        // SAFETY: both are valid places for the driver to write a size.
+        unsafe { cuda_core::sys::cuMemGetInfo_v2(&raw mut free, &raw mut total) }
+            .result()
+            .map_err(cuda_error)?;
+        Ok((total.saturating_sub(free), total))
     }
 
     /// Copies row-major float32 values to the device.

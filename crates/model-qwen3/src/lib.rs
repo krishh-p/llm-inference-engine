@@ -24,7 +24,7 @@ mod workspace;
 pub use artifacts::{ModelSummary, Qwen3Artifacts};
 pub use config::Qwen3Config;
 pub use error::{ModelError, Result};
-pub use generate::{Completion, complete};
+pub use generate::{Completion, Metrics, complete};
 pub use prompts::{RegressionCase, RegressionPromptSet};
 pub use tokenizer::Qwen3Tokenizer;
 pub use verify::{

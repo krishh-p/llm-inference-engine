@@ -1261,6 +1261,7 @@ dependencies = [
  "clap",
  "engine-core",
  "model-qwen3",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

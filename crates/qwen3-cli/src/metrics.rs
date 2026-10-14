@@ -1,0 +1,102 @@
+use model_qwen3::Completion;
+use serde_json::{Value, json};
+
+const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// One generation run as a JSON object.
+///
+/// Fields that both engines measure use the same names as the Python
+/// baseline in `modal_apps/dev.py`, so runs can be compared field by field.
+pub(crate) fn run_json(prompt: &str, completion: &Completion, seed: u64, dtype: &str) -> Value {
+    let metrics = &completion.metrics;
+    let prompt_tokens = completion.prompt_ids.len();
+    let generated_tokens = completion.token_ids.len();
+    let decode_steps = metrics.decode_step_seconds.len();
+    let decode_seconds = metrics.decode_step_seconds.iter().sum();
+
+    json!({
+        "engine": "rust",
+        "dtype": dtype,
+        "seed": seed,
+        "prompt": prompt,
+        "completion": completion.text,
+        "prompt_tokens": prompt_tokens,
+        "generated_tokens": generated_tokens,
+        "token_ids": completion.token_ids,
+        "warmup_runs": metrics.warmup_runs,
+        "model_load_seconds": metrics.model_load_seconds,
+        "cold_time_to_first_token_seconds": metrics.cold_time_to_first_token_seconds,
+        "prefill_seconds": metrics.prefill_seconds,
+        "prompt_tokens_per_second": per_second(prompt_tokens, metrics.prefill_seconds),
+        "time_to_first_token_seconds": metrics.time_to_first_token_seconds,
+        "decode_step_median_ms": percentile(&metrics.decode_step_seconds, 50).map(milliseconds),
+        "decode_step_p95_ms": percentile(&metrics.decode_step_seconds, 95).map(milliseconds),
+        "decode_tokens_per_second": per_second(decode_steps, decode_seconds),
+        "host_overhead_per_token_ms": percentile(&metrics.host_seconds, 50).map(milliseconds),
+        "generation_seconds": metrics.generation_seconds,
+        "tokens_per_second": per_second(generated_tokens, metrics.generation_seconds),
+        "gpu_memory_used_gib": gib(metrics.peak_memory_used_bytes),
+        "gpu_memory_total_gib": gib(metrics.memory_total_bytes),
+    })
+}
+
+/// The value that `percent` of the values are at or below, by nearest rank.
+/// `None` for an empty list.
+fn percentile(values: &[f64], percent: usize) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    // the smallest rank that covers `percent` of the values
+    let rank = (percent * sorted.len()).div_ceil(100).max(1);
+    Some(sorted[rank - 1])
+}
+
+// token counts and byte sizes are far below 2^52, so they convert exactly
+#[allow(clippy::cast_precision_loss)]
+fn per_second(count: usize, seconds: f64) -> Option<f64> {
+    (count > 0 && seconds > 0.0).then(|| count as f64 / seconds)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn gib(bytes: usize) -> f64 {
+    bytes as f64 / BYTES_PER_GIB
+}
+
+fn milliseconds(seconds: f64) -> f64 {
+    seconds * 1000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percentile_uses_the_nearest_rank() {
+        let values = (1..=20).map(f64::from).collect::<Vec<_>>();
+
+        assert_eq!(percentile(&values, 50), Some(10.0));
+        assert_eq!(percentile(&values, 95), Some(19.0));
+        assert_eq!(percentile(&values, 100), Some(20.0));
+    }
+
+    #[test]
+    fn percentile_sorts_first() {
+        assert_eq!(percentile(&[3.0, 1.0, 2.0], 50), Some(2.0));
+        assert_eq!(percentile(&[3.0, 1.0, 2.0], 95), Some(3.0));
+    }
+
+    #[test]
+    fn percentile_of_nothing_is_none() {
+        assert_eq!(percentile(&[], 50), None);
+        assert_eq!(percentile(&[4.0], 0), Some(4.0));
+    }
+
+    #[test]
+    fn rates_need_tokens_and_time() {
+        assert_eq!(per_second(10, 2.0), Some(5.0));
+        assert_eq!(per_second(0, 2.0), None);
+        assert_eq!(per_second(10, 0.0), None);
+    }
+}
