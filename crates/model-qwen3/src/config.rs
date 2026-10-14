@@ -101,6 +101,39 @@ impl Qwen3Config {
         }
         Ok(())
     }
+
+    /// Checks that every token ID has a row in the embedding table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the first ID that is past the vocabulary.
+    pub fn check_token_ids(&self, token_ids: &[u32]) -> Result<()> {
+        for &token_id in token_ids {
+            if !usize::try_from(token_id).is_ok_and(|id| id < self.vocab_size) {
+                return Err(ModelError::TokenOutOfRange {
+                    token_id,
+                    vocab_size: self.vocab_size,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that a forward pass was given no caches, for prefill, or one
+    /// cache for every layer, for decode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for any other number of caches.
+    pub fn check_cache_count(&self, caches: usize) -> Result<()> {
+        if caches != 0 && caches != self.num_hidden_layers {
+            return Err(ModelError::CacheCount {
+                expected: self.num_hidden_layers,
+                actual: caches,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +161,33 @@ mod tests {
         assert_eq!(config.intermediate_size, 6144);
         assert_eq!(config.num_hidden_layers, 28);
         assert_eq!(config.vocab_size, 151_936);
+    }
+
+    #[test]
+    fn checks_token_ids_against_the_vocabulary() {
+        let config: Qwen3Config =
+            serde_json::from_str(include_str!("../../../tests/model-config.json")).unwrap();
+
+        assert!(config.check_token_ids(&[0, 151_935]).is_ok());
+        let error = config.check_token_ids(&[785, 151_936]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "token ID 151936 is outside the vocabulary of 151936 tokens"
+        );
+    }
+
+    #[test]
+    fn accepts_no_caches_or_one_per_layer() {
+        let config: Qwen3Config =
+            serde_json::from_str(include_str!("../../../tests/model-config.json")).unwrap();
+
+        assert!(config.check_cache_count(0).is_ok());
+        assert!(config.check_cache_count(28).is_ok());
+        assert!(config.check_cache_count(1).is_err());
+        let error = config.check_cache_count(29).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "forward pass got 29 KV caches, expected 0 or 28"
+        );
     }
 }

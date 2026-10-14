@@ -46,6 +46,15 @@ pub enum ModelError {
         actual: Vec<u32>,
     },
 
+    #[error("token ID {token_id} is outside the vocabulary of {vocab_size} tokens")]
+    TokenOutOfRange { token_id: u32, vocab_size: usize },
+
+    #[error("forward pass got {actual} KV caches, expected 0 or {expected}")]
+    CacheCount { expected: usize, actual: usize },
+
+    #[error("fixture manifest field {0} is empty")]
+    EmptyManifestField(&'static str),
+
     #[error("fixture revision {actual} does not match pinned model revision {expected}")]
     RevisionMismatch { expected: String, actual: String },
 }

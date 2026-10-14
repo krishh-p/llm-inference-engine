@@ -3,7 +3,7 @@ use std::path::Path;
 use engine_core::{FixtureManifest, SafeTensorCatalog, Tolerance};
 
 use crate::weights::{LayerWeights, load_tensor};
-use crate::{Qwen3Artifacts, Qwen3Config, Result};
+use crate::{ModelError, Qwen3Artifacts, Qwen3Config, Result};
 
 // Each fixture tensor is listed with the manifest tolerance that applies to it.
 const PREFILL_FILE: &str = "block_0.safetensors";
@@ -68,16 +68,20 @@ pub(crate) struct ExpectedTensor {
     pub tolerance: Tolerance,
 }
 
-/// The tensors recorded for the fixture prompt's pass through the whole model.
+/// The tensors recorded for the fixture prompt's pass through the whole
+/// model, and for the decode step after it.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) struct ModelFixture {
-    pub rows: usize,
-    /// The prompt's embeddings, `[rows, hidden_size]`.
-    pub input: Vec<f32>,
+    pub token_ids: Vec<u32>,
+    /// The prompt's embeddings, `[tokens, hidden_size]`.
+    pub embedding: Vec<f32>,
     /// The last prompt token after each layer, `[layers, hidden_size]`.
     pub layer_outputs: Vec<f32>,
     pub final_norm: Vec<f32>,
-    pub logits: Vec<f32>,
+    pub prefill_logits: Vec<f32>,
+    /// The first generated token, which the decode step runs.
+    pub decode_token_id: u32,
+    pub decode_logits: Vec<f32>,
     pub layer_tolerance: Tolerance,
     pub logits_tolerance: Tolerance,
 }
@@ -122,12 +126,12 @@ pub fn verify_layer_0(
     run_on_gpu(config, &weights, &prefill, &decode)
 }
 
-/// Runs the fixture prompt through the whole model on the GPU and compares
-/// the last token after each layer, the final norm and the logits with the
-/// golden fixtures.
+/// Runs the fixture prompt through the whole model on the GPU, starting from
+/// its token IDs, and compares the embeddings, the last token after each
+/// layer, the final norm and the logits with the golden fixtures.
 ///
-/// The run starts from the prompt's embeddings recorded in the fixtures, so
-/// the model is checked before it has its own embedding lookup.
+/// It then decodes the first generated token against the caches the prompt
+/// left in all 28 layers and compares those logits too.
 ///
 /// # Errors
 ///
@@ -147,15 +151,21 @@ pub fn verify_model(
     let generation = SafeTensorCatalog::open_files([fixture_dir.join(GENERATION_FILE)])?;
 
     let fixture = ModelFixture {
-        rows,
-        input: load_tensor(&prefill, "input", &[rows, config.hidden_size])?,
+        token_ids: manifest.token_ids.clone(),
+        embedding: load_tensor(&prefill, "input", &[rows, config.hidden_size])?,
         layer_outputs: load_tensor(
             &generation,
             "layer_outputs",
             &[config.num_hidden_layers, config.hidden_size],
         )?,
         final_norm: load_tensor(&generation, "final_norm", &[config.hidden_size])?,
-        logits: load_tensor(&generation, "prefill_logits", &[config.vocab_size])?,
+        prefill_logits: load_tensor(&generation, "prefill_logits", &[config.vocab_size])?,
+        decode_token_id: manifest
+            .expected_greedy_token_ids
+            .first()
+            .copied()
+            .ok_or(ModelError::EmptyManifestField("expected_greedy_token_ids"))?,
+        decode_logits: load_tensor(&generation, "decode_logits", &[config.vocab_size])?,
         layer_tolerance: manifest.tolerance(GENERATION_FILE, "layer_output")?,
         logits_tolerance: manifest.tolerance(GENERATION_FILE, "logits")?,
     };
@@ -260,15 +270,25 @@ fn run_model_on_gpu(
     use crate::trace::Trace;
 
     let hidden_size = artifacts.config.hidden_size;
-    let rows = fixture.rows;
+    let rows = fixture.token_ids.len();
     let backend = cuda_backend::Backend::new()?;
     let model = Model::load(&backend, artifacts)?;
 
     let mut trace = Trace::recording();
-    let x = backend.upload(&fixture.input, &[rows, hidden_size])?;
-    model.forward(x, rows, &[], &mut trace)?;
+    let (_, caches) = model.forward(&fixture.token_ids, &[], &mut trace)?;
 
     let mut results = Vec::new();
+    // widening bfloat16 to float32 is exact, so the rows must match exactly
+    check(
+        &mut results,
+        "embedding".to_owned(),
+        trace.get("embedding")?,
+        &fixture.embedding,
+        Tolerance {
+            atol: 0.0,
+            rtol: 0.0,
+        },
+    )?;
     for (layer, expected) in fixture.layer_outputs.chunks(hidden_size).enumerate() {
         let name = format!("layer_{layer}_output");
         let output = trace.get(&name)?;
@@ -293,7 +313,17 @@ fn run_model_on_gpu(
         &mut results,
         "prefill_logits".to_owned(),
         trace.get("logits")?,
-        &fixture.logits,
+        &fixture.prefill_logits,
+        fixture.logits_tolerance,
+    )?;
+
+    // decode attends to the caches that prefill just built in every layer
+    let (logits, _) = model.forward(&[fixture.decode_token_id], &caches, &mut Trace::off())?;
+    check(
+        &mut results,
+        "decode_logits".to_owned(),
+        &backend.download(&logits)?,
+        &fixture.decode_logits,
         fixture.logits_tolerance,
     )?;
     Ok(results)

@@ -147,8 +147,11 @@ value projections, the rotated queries and keys, the attention scores and
 probabilities, the attention output, the MLP output and the layer output. The
 decode pass also checks the cache before and after the new token is added.
 
-After layer 0, the same command loads all 28 layers, keeps every one on the
-GPU, and runs the prompt through them in order. The last prompt token is
+After layer 0, the same command loads the whole model, keeps it on the GPU,
+and runs the prompt from its token IDs. Each token's row is copied out of the
+embedding table, and the result must match the fixture exactly, since widening
+bfloat16 to float32 loses nothing. The rows then go through all 28 layers in
+order. The last prompt token is
 compared with the fixture after every layer, so a mismatch points to the first
 layer that went wrong. Errors grow from about `5e-7` after layer 0 to a few
 `1e-4` near the end, where hidden values reach the thousands and float32
@@ -157,7 +160,9 @@ rounding steps are larger.
 The last token then goes through the final RMSNorm and the LM head. Qwen3-1.7B
 ties its LM head to the embedding table, so the head is the
 `[151936, 2048]` embedding matrix. The final norm and all 151,936 prefill
-logits are compared with the fixture too.
+logits are compared with the fixture too. Finally, the first generated token
+is decoded against the caches the prompt left in every layer, and its logits
+are checked the same way.
 
 ```bash
 make rust-verify
