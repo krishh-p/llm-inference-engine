@@ -3,7 +3,7 @@ use std::path::Path;
 use engine_core::{FixtureManifest, SafeTensorCatalog, Tolerance};
 
 use crate::weights::{LayerWeights, load_tensor};
-use crate::{ModelError, Qwen3Artifacts, Qwen3Config, Result};
+use crate::{ModelError, Qwen3Artifacts, Qwen3Config, RegressionPromptSet, Result};
 
 // Each fixture tensor is listed with the manifest tolerance that applies to it.
 const PREFILL_FILE: &str = "block_0.safetensors";
@@ -49,6 +49,15 @@ pub struct BoundaryResult {
     pub name: String,
     pub max_abs_error: f32,
     pub tolerance: Tolerance,
+}
+
+/// The tokens one prompt generated on the GPU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationResult {
+    pub prompt: String,
+    /// The tokens that would stop generation early.
+    pub eos_ids: Vec<u32>,
+    pub token_ids: Vec<u32>,
 }
 
 /// The tensors recorded for one pass through layer 0.
@@ -164,13 +173,40 @@ pub fn verify_model(
             .expected_greedy_token_ids
             .first()
             .copied()
-            .ok_or_else(|| ModelError::MissingTensor("expected_greedy_token_ids".to_owned()))?,
+            .ok_or(ModelError::EmptyManifestField("expected_greedy_token_ids"))?,
         decode_logits: load_tensor(&generation, "decode_logits", &[config.vocab_size])?,
         layer_tolerance: manifest.tolerance(GENERATION_FILE, "layer_output")?,
         logits_tolerance: manifest.tolerance(GENERATION_FILE, "logits")?,
     };
 
     run_model_on_gpu(artifacts, &fixture)
+}
+
+/// Loads the model on the GPU and greedily generates from every regression
+/// prompt, checking that each produces the tokens the reference did.
+///
+/// One more run of the first prompt treats its second expected token as the
+/// end-of-sequence token, and checks that generation stops right after it.
+///
+/// # Errors
+///
+/// Returns an error when a weight cannot be loaded, the GPU is unavailable,
+/// there is no first prompt with at least two expected tokens, or any run
+/// generates different tokens.
+pub fn verify_generation(
+    artifacts: &Qwen3Artifacts,
+    prompts: &RegressionPromptSet,
+) -> Result<Vec<GenerationResult>> {
+    let first_expected = prompts
+        .cases
+        .first()
+        .map_or(0, |case| case.expected_token_ids.len());
+    if first_expected < 2 {
+        return Err(ModelError::InvalidConfig(
+            "the first regression prompt needs at least two expected tokens".to_owned(),
+        ));
+    }
+    generate_on_gpu(artifacts, prompts)
 }
 
 fn load_fixture(
@@ -351,5 +387,73 @@ fn run_model_on_gpu(
     _artifacts: &Qwen3Artifacts,
     _fixture: &ModelFixture,
 ) -> Result<Vec<BoundaryResult>> {
+    Err(cuda_backend::BackendError::CudaDisabled.into())
+}
+
+#[cfg(feature = "cuda")]
+fn generate_on_gpu(
+    artifacts: &Qwen3Artifacts,
+    prompts: &RegressionPromptSet,
+) -> Result<Vec<GenerationResult>> {
+    use crate::generate::generate;
+    use crate::model::Model;
+
+    let backend = cuda_backend::Backend::new()?;
+    let model = Model::load(&backend, artifacts)?;
+    let max_new_tokens = prompts.max_new_tokens;
+    let mut results = Vec::new();
+
+    let eos_ids = vec![artifacts.config.eos_token_id];
+    for case in &prompts.cases {
+        let token_ids = generate(&backend, &model, &case.token_ids, max_new_tokens, &eos_ids)?;
+        results.push(expect_tokens(
+            &case.prompt,
+            &eos_ids,
+            token_ids,
+            &case.expected_token_ids,
+        )?);
+    }
+
+    // the base model rarely ends a short completion, so a token it is known
+    // to generate stands in for the end-of-sequence token
+    let case = &prompts.cases[0];
+    let eos_ids = vec![case.expected_token_ids[1]];
+    let token_ids = generate(&backend, &model, &case.token_ids, max_new_tokens, &eos_ids)?;
+    results.push(expect_tokens(
+        &case.prompt,
+        &eos_ids,
+        token_ids,
+        &case.expected_token_ids[..2],
+    )?);
+
+    Ok(results)
+}
+
+#[cfg(feature = "cuda")]
+fn expect_tokens(
+    prompt: &str,
+    eos_ids: &[u32],
+    token_ids: Vec<u32>,
+    expected: &[u32],
+) -> Result<GenerationResult> {
+    if token_ids != expected {
+        return Err(ModelError::GenerationMismatch {
+            prompt: prompt.to_owned(),
+            expected: expected.to_vec(),
+            actual: token_ids,
+        });
+    }
+    Ok(GenerationResult {
+        prompt: prompt.to_owned(),
+        eos_ids: eos_ids.to_vec(),
+        token_ids,
+    })
+}
+
+#[cfg(not(feature = "cuda"))]
+fn generate_on_gpu(
+    _artifacts: &Qwen3Artifacts,
+    _prompts: &RegressionPromptSet,
+) -> Result<Vec<GenerationResult>> {
     Err(cuda_backend::BackendError::CudaDisabled.into())
 }
