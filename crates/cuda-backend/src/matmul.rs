@@ -79,7 +79,7 @@ pub(crate) struct HeadGemm {
     pub heads: usize,
     /// How many left heads share each right head.
     pub group: usize,
-    /// Elements in one head of each tensor.
+    /// Elements from the start of one head to the start of the next.
     pub left_elements: usize,
     pub right_elements: usize,
     pub output_elements: usize,
@@ -88,16 +88,22 @@ pub(crate) struct HeadGemm {
 /// Plans `output[h] = left[h] @ right[h / group]` for every head `h`, with the
 /// right matrices optionally transposed.
 ///
+/// Only the first `right_rows` rows of each right head are used, and the rest
+/// are skipped. A KV cache keeps room for more tokens than it holds, so this
+/// lets attention read just the filled rows.
+///
 /// # Errors
 ///
 /// Returns an error when a shape is not three-dimensional, the left heads are
-/// not a multiple of the right heads, or the matrices in each head do not agree.
+/// not a multiple of the right heads, `right_rows` is zero or more than the
+/// right heads have, or the matrices in each head do not agree.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn plan_head_gemm(
     left: &[i32],
     right: &[i32],
     output: &[i32],
     right_transposed: bool,
+    right_rows: usize,
 ) -> Result<HeadGemm, BackendError> {
     let mismatch = || BackendError::MatmulShape {
         left: left.to_vec(),
@@ -115,7 +121,12 @@ pub(crate) fn plan_head_gemm(
     if right_heads <= 0 || heads % right_heads != 0 || output_heads != heads {
         return Err(mismatch());
     }
-    let call = plan_gemm(&left[1..], &right[1..], &output[1..], right_transposed)
+    let used_rows = i32::try_from(right_rows).map_err(|_| mismatch())?;
+    if used_rows <= 0 || used_rows > right[1] {
+        return Err(mismatch());
+    }
+    let used_right = [used_rows, right[2]];
+    let call = plan_gemm(&left[1..], &used_right, &output[1..], right_transposed)
         .map_err(|_| mismatch())?;
 
     let elements = |shape: &[i32]| {
@@ -256,7 +267,7 @@ mod tests {
     #[test]
     fn plans_attention_scores_with_shared_key_heads() {
         // q [16, 5, 128] @ k [8, 5, 128]^T -> [16, 5, 5]
-        let plan = plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[16, 5, 5], true).unwrap();
+        let plan = plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[16, 5, 5], true, 5).unwrap();
 
         assert_eq!(
             plan.call,
@@ -272,15 +283,58 @@ mod tests {
     #[test]
     fn rejects_heads_that_do_not_divide_evenly() {
         assert!(matches!(
-            plan_head_gemm(&[16, 5, 128], &[6, 5, 128], &[16, 5, 5], true),
+            plan_head_gemm(&[16, 5, 128], &[6, 5, 128], &[16, 5, 5], true, 5),
             Err(BackendError::MatmulShape { .. })
         ));
         assert!(matches!(
-            plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[8, 5, 5], true),
+            plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[8, 5, 5], true, 5),
             Err(BackendError::MatmulShape { .. })
         ));
         assert!(matches!(
-            plan_head_gemm(&[5, 128], &[5, 128], &[5, 5], true),
+            plan_head_gemm(&[5, 128], &[5, 128], &[5, 5], true, 5),
+            Err(BackendError::MatmulShape { .. })
+        ));
+    }
+
+    #[test]
+    fn reads_only_the_filled_rows_of_a_cache() {
+        // q [16, 1, 128] @ the first 6 of 12 rows of k [8, 12, 128], transposed
+        let plan = plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 6], true, 6).unwrap();
+
+        assert_eq!(
+            plan.call,
+            plan_gemm(&[1, 128], &[6, 128], &[1, 6], true).unwrap()
+        );
+        // the next head still starts a whole cache head later
+        assert_eq!(plan.right_elements, 12 * 128);
+        assert_eq!(plan.output_elements, 6);
+    }
+
+    #[test]
+    fn mixes_values_from_the_filled_rows_of_a_cache() {
+        // probs [16, 1, 6] @ the first 6 of 12 rows of v [8, 12, 128]
+        let plan = plan_head_gemm(&[16, 1, 6], &[8, 12, 128], &[16, 1, 128], false, 6).unwrap();
+
+        assert_eq!(
+            plan.call,
+            plan_gemm(&[1, 6], &[6, 128], &[1, 128], false).unwrap()
+        );
+        assert_eq!(plan.right_elements, 12 * 128);
+    }
+
+    #[test]
+    fn rejects_more_rows_than_the_cache_has() {
+        assert!(matches!(
+            plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 13], true, 13),
+            Err(BackendError::MatmulShape { .. })
+        ));
+        assert!(matches!(
+            plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 0], true, 0),
+            Err(BackendError::MatmulShape { .. })
+        ));
+        // the output must match the rows that are read, not the whole cache
+        assert!(matches!(
+            plan_head_gemm(&[16, 1, 128], &[8, 12, 128], &[16, 1, 12], true, 6),
             Err(BackendError::MatmulShape { .. })
         ));
     }

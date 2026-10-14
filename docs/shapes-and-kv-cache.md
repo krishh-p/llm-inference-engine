@@ -52,6 +52,14 @@ If the cache already contains `n` tokens, one decode step has:
 Prefill and decode use the same forward path. Prefill passes many tokens with an
 empty cache; decode passes one token with an existing cache.
 
+The Python reference grows its cache with `torch.cat`, which copies the whole
+cache for every new token. The Rust engine allocates each layer's K and V once
+as `[8, capacity, 128]`, where `capacity` is the prompt length plus the most
+tokens that will be generated. A new token writes its row at position `n`, and
+attention reads only rows `0..n + 1` of each head. cuBLAS steps from one head to
+the next by the full `capacity * 128` elements, so the unused rows are never
+touched.
+
 ## KV cache memory
 
 For batch size 1:

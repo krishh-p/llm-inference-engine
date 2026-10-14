@@ -1,6 +1,7 @@
 use cuda_backend::{Backend, Tensor};
 
-use crate::attention::{Attention, KvCache};
+use crate::attention::Attention;
+use crate::kv_cache::KvCache;
 use crate::mlp::Mlp;
 use crate::trace::Trace;
 use crate::weights::LayerWeights;
@@ -39,22 +40,23 @@ impl<'a> Block<'a> {
     /// Runs `rows` new tokens through the layer: attention, then the MLP,
     /// each normalized first and added back to its input.
     ///
-    /// Prefill passes no cache and decode passes the cache from the tokens so
-    /// far. `x` is `[rows, hidden_size]`, and the result has the same shape.
+    /// Prefill passes an empty cache and decode passes the cache from the
+    /// tokens so far, and either way the new tokens are added to it. `x` is
+    /// `[rows, hidden_size]`, and the result has the same shape.
     pub(crate) fn forward(
         &self,
         x: &Tensor<f32>,
         rows: usize,
-        cache: Option<&KvCache>,
+        cache: &mut KvCache,
         trace: &mut Trace,
-    ) -> Result<(Tensor<f32>, KvCache)> {
+    ) -> Result<Tensor<f32>> {
         let backend = self.backend;
         let shape = [rows, self.hidden_size];
 
         let mut normalized = backend.zeros(&shape)?;
         backend.rms_norm(&mut normalized, x, &self.input_norm, self.epsilon)?;
         trace.save(backend, "input_norm", &normalized)?;
-        let (attention_output, cache) = self.attention.forward(&normalized, rows, cache, trace)?;
+        let attention_output = self.attention.forward(&normalized, rows, cache, trace)?;
 
         // the residual add and the norm that follows it run as one kernel
         let mut x_after_attention = backend.zeros(&shape)?;
@@ -73,7 +75,6 @@ impl<'a> Block<'a> {
         let mut output = backend.zeros(&shape)?;
         backend.add(&mut output, &x_after_attention, &mlp_output)?;
         trace.save(backend, "output", &output)?;
-
-        Ok((output, cache))
+        Ok(output)
     }
 }

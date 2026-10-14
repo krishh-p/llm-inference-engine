@@ -43,6 +43,7 @@ pub(crate) fn expect_shape(
 /// Checks that `rows` rows starting at `first` fit in a matrix of `available` rows.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn check_row_range(
+    operation: &'static str,
     name: &'static str,
     first: usize,
     rows: usize,
@@ -51,6 +52,7 @@ pub(crate) fn check_row_range(
     // written so it cannot overflow, since this guards a raw memory copy
     if rows == 0 || first > available || rows > available - first {
         return Err(BackendError::RowRange {
+            operation,
             name,
             first,
             rows,
@@ -66,25 +68,25 @@ mod tests {
 
     #[test]
     fn accepts_the_last_row() {
-        assert!(check_row_range("input", 4, 1, 5).is_ok());
+        assert!(check_row_range("copy_rows", "input", 4, 1, 5).is_ok());
     }
 
     #[test]
     fn rejects_rows_past_the_end() {
-        let error = check_row_range("input", 4, 2, 5).unwrap_err();
+        let error = check_row_range("copy_rows", "input", 4, 2, 5).unwrap_err();
 
         assert_eq!(
             error.to_string(),
             "copy_rows input needs 2 rows from row 4, but has 5 rows"
         );
-        assert!(check_row_range("input", 0, 0, 5).is_err());
+        assert!(check_row_range("copy_rows", "input", 0, 0, 5).is_err());
     }
 
     #[test]
     fn rejects_ranges_that_would_overflow() {
-        assert!(check_row_range("input", usize::MAX, 1, 5).is_err());
-        assert!(check_row_range("input", 1, usize::MAX, 5).is_err());
-        assert!(check_row_range("input", usize::MAX, usize::MAX, usize::MAX).is_err());
+        assert!(check_row_range("copy_rows", "input", usize::MAX, 1, 5).is_err());
+        assert!(check_row_range("copy_rows", "input", 1, usize::MAX, 5).is_err());
+        assert!(check_row_range("copy_rows", "input", usize::MAX, usize::MAX, usize::MAX).is_err());
     }
 
     #[test]

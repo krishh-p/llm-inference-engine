@@ -73,7 +73,9 @@ mod gpu {
     ) -> Result<Vec<u32>> {
         check_request(prompt_ids.len(), max_new_tokens, model.max_positions())?;
 
-        let (mut logits, mut caches) = model.forward(prompt_ids, &[], &mut Trace::off())?;
+        // the caches are allocated once, with room for the whole sequence
+        let mut caches = model.new_caches(prompt_ids.len() + max_new_tokens)?;
+        let mut logits = model.forward(prompt_ids, &mut caches, &mut Trace::off())?;
         let mut generated = Vec::with_capacity(max_new_tokens);
         loop {
             let token_id = argmax(&backend.download(&logits)?);
@@ -81,7 +83,7 @@ mod gpu {
             if is_finished(&generated, max_new_tokens, eos_ids) {
                 return Ok(generated);
             }
-            (logits, caches) = model.forward(&[token_id], &caches, &mut Trace::off())?;
+            logits = model.forward(&[token_id], &mut caches, &mut Trace::off())?;
         }
     }
 
@@ -102,7 +104,9 @@ mod gpu {
         let mut sequence = prompt_ids.to_vec();
         let mut generated = Vec::with_capacity(max_new_tokens);
         loop {
-            let (logits, _) = model.forward(&sequence, &[], &mut Trace::off())?;
+            // fresh caches every time, so nothing carries over between steps
+            let mut caches = model.new_caches(sequence.len())?;
+            let logits = model.forward(&sequence, &mut caches, &mut Trace::off())?;
             let token_id = argmax(&backend.download(&logits)?);
             generated.push(token_id);
             if is_finished(&generated, max_new_tokens, eos_ids) {

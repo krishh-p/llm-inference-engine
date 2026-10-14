@@ -55,7 +55,7 @@ pub enum ModelError {
     #[error("token ID {token_id} is outside the vocabulary of {vocab_size} tokens")]
     TokenOutOfRange { token_id: u32, vocab_size: usize },
 
-    #[error("forward pass got {actual} KV caches, expected 0 or {expected}")]
+    #[error("forward pass got {actual} KV caches, expected {expected}")]
     CacheCount { expected: usize, actual: usize },
 
     #[error("the prompt has no tokens")]
@@ -86,6 +86,16 @@ pub enum ModelError {
         cached: Vec<u32>,
         uncached: Vec<u32>,
     },
+
+    #[error("KV cache holds {len} of {capacity} tokens, so {rows} more do not fit")]
+    CacheFull {
+        len: usize,
+        rows: usize,
+        capacity: usize,
+    },
+
+    #[error("check failed: {0}")]
+    CheckFailed(String),
 
     #[error("fixture manifest field {0} is empty")]
     EmptyManifestField(&'static str),

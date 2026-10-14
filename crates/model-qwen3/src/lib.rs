@@ -11,6 +11,7 @@ mod weights;
 mod attention;
 #[cfg(feature = "cuda")]
 mod block;
+mod kv_cache;
 #[cfg(feature = "cuda")]
 mod mlp;
 #[cfg(feature = "cuda")]

@@ -176,6 +176,13 @@ Every one of those runs is repeated without caches: for each new token, the
 whole sequence so far runs again from the start. Both ways must pick the same
 tokens, which shows the caches hold exactly what recomputing would produce.
 
+Each layer's cache is allocated once, with room for the prompt and every new
+token, and each token writes only its own row. Attention reads just the filled
+rows. The checks give every cache a few spare rows filled with NaN, so reading
+a row no token has written shows up as a failure instead of quietly reading
+zeros. They also check that a write past the end of a cache is refused before
+any layer changes.
+
 ```bash
 make rust-verify
 ```

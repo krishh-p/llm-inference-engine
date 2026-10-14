@@ -42,6 +42,10 @@ const DECODE_TENSORS: [(&str, &str); 16] = [
     ("output", "block_output"),
 ];
 const GENERATION_FILE: &str = "generation.safetensors";
+// The checks give every cache rows that no token fills. They start as NaN, so
+// reading one by mistake fails the comparisons.
+#[cfg(feature = "cuda")]
+const SPARE_CACHE_ROWS: usize = 3;
 
 /// How closely one GPU tensor matched its fixture.
 #[derive(Debug, Clone, PartialEq)]
@@ -246,21 +250,24 @@ fn run_on_gpu(
     decode: &LayerFixture,
 ) -> Result<Vec<BoundaryResult>> {
     use crate::block::Block;
+    use crate::kv_cache::KvCache;
     use crate::trace::Trace;
 
     let backend = cuda_backend::Backend::new()?;
     let block = Block::new(&backend, config, weights)?;
+    let capacity = prefill.rows + decode.rows + SPARE_CACHE_ROWS;
+    let mut cache = KvCache::filled_with_nan(&backend, config, capacity)?;
     let mut results = Vec::new();
 
     let mut trace = Trace::recording();
     let x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
-    let (_, cache) = block.forward(&x, prefill.rows, None, &mut trace)?;
+    block.forward(&x, prefill.rows, &mut cache, &mut trace)?;
     compare(prefill, &trace, &mut results)?;
 
-    // decode attends to the cache that prefill just built
+    // decode attends to the cache that prefill just filled
     let mut trace = Trace::recording();
     let x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
-    block.forward(&x, decode.rows, Some(&cache), &mut trace)?;
+    block.forward(&x, decode.rows, &mut cache, &mut trace)?;
     compare(decode, &trace, &mut results)?;
 
     Ok(results)
@@ -303,16 +310,24 @@ fn run_model_on_gpu(
     artifacts: &Qwen3Artifacts,
     fixture: &ModelFixture,
 ) -> Result<Vec<BoundaryResult>> {
+    use crate::kv_cache::KvCache;
     use crate::model::Model;
     use crate::trace::Trace;
 
-    let hidden_size = artifacts.config.hidden_size;
+    let config = &artifacts.config;
+    let hidden_size = config.hidden_size;
     let rows = fixture.token_ids.len();
     let backend = cuda_backend::Backend::new()?;
     let model = Model::load(&backend, artifacts)?;
 
+    // room for the prompt and the decoded token, plus the spare rows
+    let capacity = rows + 1 + SPARE_CACHE_ROWS;
+    let mut caches = (0..config.num_hidden_layers)
+        .map(|_| KvCache::filled_with_nan(&backend, config, capacity))
+        .collect::<Result<Vec<_>>>()?;
+
     let mut trace = Trace::recording();
-    let (_, caches) = model.forward(&fixture.token_ids, &[], &mut trace)?;
+    model.forward(&fixture.token_ids, &mut caches, &mut trace)?;
 
     let mut results = Vec::new();
     // widening bfloat16 to float32 is exact, so the rows must match exactly
@@ -354,8 +369,8 @@ fn run_model_on_gpu(
         fixture.logits_tolerance,
     )?;
 
-    // decode attends to the caches that prefill just built in every layer
-    let (logits, _) = model.forward(&[fixture.decode_token_id], &caches, &mut Trace::off())?;
+    // decode attends to the caches that prefill just filled in every layer
+    let logits = model.forward(&[fixture.decode_token_id], &mut caches, &mut Trace::off())?;
     check(
         &mut results,
         "decode_logits".to_owned(),
@@ -363,6 +378,24 @@ fn run_model_on_gpu(
         &fixture.decode_logits,
         fixture.logits_tolerance,
     )?;
+
+    // one token more than the caches have room for must be refused before
+    // any layer has changed
+    let too_many = vec![fixture.decode_token_id; SPARE_CACHE_ROWS + 1];
+    match model.forward(&too_many, &mut caches, &mut Trace::off()) {
+        Err(ModelError::CacheFull { .. }) => {}
+        Err(error) => return Err(error),
+        Ok(_) => {
+            return Err(ModelError::CheckFailed(
+                "a full KV cache accepted more tokens".to_owned(),
+            ));
+        }
+    }
+    if caches.iter().any(|cache| cache.len != rows + 1) {
+        return Err(ModelError::CheckFailed(
+            "a refused write still changed a KV cache".to_owned(),
+        ));
+    }
     Ok(results)
 }
 

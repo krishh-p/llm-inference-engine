@@ -195,8 +195,9 @@ pub enum BackendError {
         actual: Vec<i32>,
     },
 
-    #[error("copy_rows {name} needs {rows} rows from row {first}, but has {available} rows")]
+    #[error("{operation} {name} needs {rows} rows from row {first}, but has {available} rows")]
     RowRange {
+        operation: &'static str,
         name: &'static str,
         first: usize,
         rows: usize,

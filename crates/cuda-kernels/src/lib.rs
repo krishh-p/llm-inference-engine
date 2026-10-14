@@ -4,7 +4,6 @@
 #[cfg(feature = "cuda")]
 pub use kernels::{
     causal_softmax_kernel::causal_softmax_f32,
-    concat_rows_kernel::concat_rows_f32,
     elementwise_kernel::{add_f32, silu_mul_f32},
     rms_norm_kernel::{add_rms_norm_f32, rms_norm_bf16, rms_norm_f32},
     rope_kernel::rope_f32,
@@ -180,32 +179,6 @@ mod kernels {
             let sum: Tile<f32, { [1, 1] }> = reduce_sum(weight, 2);
             let sum = sum.reshape(shape![1, 1, 1]).broadcast(shape![1, 1, N]);
             output.store(weight / sum);
-        }
-    }
-
-    #[cutile::module]
-    pub mod concat_rows_kernel {
-        #[allow(clippy::wildcard_imports)]
-        use cutile::core::*;
-
-        /// Joins two `[heads, rows, width]` tensors along their rows. The
-        /// first `first_rows` rows of each head come from `first`.
-        #[cutile::entry()]
-        pub fn concat_rows_f32<const D: i32>(
-            output: &mut Tensor<f32, { [1, 1, D] }>,
-            first: &Tensor<f32, { [-1, -1, -1] }>,
-            second: &Tensor<f32, { [-1, -1, -1] }>,
-            first_rows: i32,
-        ) {
-            let block: (i32, i32, i32) = get_tile_block_id();
-            // rows that belong to `first` read row 0 here, then replace it below
-            let second_row: i32 = max(block.1 - first_rows, 0i32);
-            let mut x: Tile<f32, { [1, 1, D] }> =
-                load_tile(second, shape![1, 1, D], [block.0, second_row, 0i32]);
-            if block.1 < first_rows {
-                x = load_tile(first, shape![1, 1, D], [block.0, block.1, 0i32]);
-            }
-            output.store(x);
         }
     }
 

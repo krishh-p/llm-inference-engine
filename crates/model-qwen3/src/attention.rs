@@ -1,18 +1,9 @@
 use cuda_backend::{Backend, Tensor, reshape, rope_tables};
 
+use crate::kv_cache::KvCache;
 use crate::trace::Trace;
 use crate::weights::AttentionWeights;
 use crate::{Qwen3Config, Result};
-
-/// The keys and values of every token one layer has seen.
-///
-/// Keys are stored after their norm and rotation, so a later token can use
-/// them as they are. Both tensors are `[kv_heads, len, head_dim]`.
-pub(crate) struct KvCache {
-    k: Tensor<f32>,
-    v: Tensor<f32>,
-    len: usize,
-}
 
 /// One layer's attention with its weights on the GPU.
 pub(crate) struct Attention<'a> {
@@ -63,17 +54,18 @@ impl<'a> Attention<'a> {
     /// tokens in `cache`. Each new token sees the cached tokens, the new
     /// tokens before it, and itself.
     ///
-    /// `x` is the normalized layer input, `[rows, hidden_size]`. The result
-    /// has the same shape and comes with the cache extended by the new tokens.
+    /// `x` is the normalized layer input, `[rows, hidden_size]`, and the
+    /// result has the same shape. The new tokens' keys and values are written
+    /// into `cache`, which is empty for prefill.
     pub(crate) fn forward(
         &self,
         x: &Tensor<f32>,
         rows: usize,
-        cache: Option<&KvCache>,
+        cache: &mut KvCache,
         trace: &mut Trace,
-    ) -> Result<(Tensor<f32>, KvCache)> {
+    ) -> Result<Tensor<f32>> {
         let backend = self.backend;
-        let cached = cache.map_or(0, |cache| cache.len);
+        let cached = cache.len;
         let total = cached + rows;
         let (q, k, v) = self.project(x, rows, trace)?;
 
@@ -91,25 +83,17 @@ impl<'a> Attention<'a> {
         trace.save(backend, "k_rope", &k)?;
 
         // the new keys and values go after the cached ones
-        let (k, v) = match cache {
-            Some(cache) => {
-                trace.save(backend, "cache_k_in", &cache.k)?;
-                trace.save(backend, "cache_v_in", &cache.v)?;
-                let shape = [self.kv_heads, total, self.head_dim];
-                let mut all_k = backend.zeros(&shape)?;
-                backend.concat_rows(&mut all_k, &cache.k, &k)?;
-                let mut all_v = backend.zeros(&shape)?;
-                backend.concat_rows(&mut all_v, &cache.v, &v)?;
-                (all_k, all_v)
-            }
-            None => (k, v),
-        };
-        trace.save(backend, "cache_k_out", &k)?;
-        trace.save(backend, "cache_v_out", &v)?;
+        if cached > 0 {
+            trace.save_rows(backend, "cache_k_in", &cache.k, cached)?;
+            trace.save_rows(backend, "cache_v_in", &cache.v, cached)?;
+        }
+        cache.append(backend, &k, &v, rows)?;
+        trace.save_rows(backend, "cache_k_out", &cache.k, total)?;
+        trace.save_rows(backend, "cache_v_out", &cache.v, total)?;
 
         // rows are the new tokens, columns are the tokens they attend to
         let mut scores = backend.zeros(&[self.heads, rows, total])?;
-        backend.matmul_heads_transposed(&mut scores, &q, &k, self.score_scale())?;
+        backend.matmul_heads_transposed(&mut scores, &q, &cache.k, total, self.score_scale())?;
         trace.save(backend, "scores", &scores)?;
 
         let mut probs = backend.zeros(&[self.heads, rows, total])?;
@@ -118,15 +102,13 @@ impl<'a> Attention<'a> {
 
         // weighted sum of values, [heads, rows, head_dim]
         let mut mixed = backend.zeros(&[self.heads, rows, self.head_dim])?;
-        backend.matmul_heads(&mut mixed, &probs, &v)?;
+        backend.matmul_heads(&mut mixed, &probs, &cache.v, total)?;
 
         let merged = self.merge_heads(&mixed, rows)?;
         let mut output = backend.zeros(&[rows, self.hidden_size])?;
         backend.matmul_transposed(&mut output, &merged, &self.o_proj)?;
         trace.save(backend, "attention_output", &output)?;
-
-        let cache = KvCache { k, v, len: total };
-        Ok((output, cache))
+        Ok(output)
     }
 
     /// Projects the layer input into query, key and value heads.

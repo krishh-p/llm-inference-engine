@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use cuda_core::{Device, Stream};
 use cuda_kernels::{
-    add_f32, add_rms_norm_f32, causal_softmax_f32, concat_rows_f32, rms_norm_f32, rope_f32,
-    silu_mul_f32, swap_leading_axes_f32,
+    add_f32, add_rms_norm_f32, causal_softmax_f32, rms_norm_f32, rope_f32, silu_mul_f32,
+    swap_leading_axes_f32,
 };
 use cutile::prelude::*;
 
@@ -98,8 +98,8 @@ impl Backend {
         let [input_rows, width] = dims("copy_rows", "input", input.shape())?;
         let [output_rows, _] = dims("copy_rows", "output", output.shape())?;
         expect_shape("copy_rows", "output", output.shape(), &[output_rows, width])?;
-        check_row_range("input", input_row, rows, input_rows)?;
-        check_row_range("output", output_row, rows, output_rows)?;
+        check_row_range("copy_rows", "input", input_row, rows, input_rows)?;
+        check_row_range("copy_rows", "output", output_row, rows, output_rows)?;
         self.check_tensors(&[("input", input), ("output", &*output)])?;
 
         let row_bytes = width * size_of::<f32>();
@@ -154,6 +154,8 @@ impl Backend {
     /// The tensors are `[heads, rows, cols]`. When `right` has fewer heads,
     /// each one is shared by `group` consecutive left heads, which is how
     /// grouped-query attention pairs query heads with key and value heads.
+    /// Only the first `right_rows` rows of each right head are used, so
+    /// `right` can be a KV cache with room for more tokens than it holds.
     ///
     /// # Errors
     ///
@@ -164,12 +166,14 @@ impl Backend {
         output: &mut Tensor<f32>,
         left: &Tensor<f32>,
         right: &Tensor<f32>,
+        right_rows: usize,
     ) -> Result<(), BackendError> {
-        self.head_gemm(output, left, right, false, 1.0)
+        self.head_gemm(output, left, right, false, right_rows, 1.0)
     }
 
     /// Computes `output[h] = scale * left[h] @ right[h / group]^T` for every
-    /// head `h`. See [`Backend::matmul_heads`] for how heads are paired.
+    /// head `h`. See [`Backend::matmul_heads`] for how heads are paired and
+    /// which rows of `right` are used.
     ///
     /// # Errors
     ///
@@ -180,9 +184,10 @@ impl Backend {
         output: &mut Tensor<f32>,
         left: &Tensor<f32>,
         right: &Tensor<f32>,
+        right_rows: usize,
         scale: f32,
     ) -> Result<(), BackendError> {
-        self.head_gemm(output, left, right, true, scale)
+        self.head_gemm(output, left, right, true, right_rows, scale)
     }
 
     /// Computes `output = left + right` for matrices of the same shape.
@@ -380,44 +385,59 @@ impl Backend {
         Ok(())
     }
 
-    /// Joins two `[heads, rows, width]` tensors along their rows, with the
-    /// rows of `first` ahead of the rows of `second` in every head.
+    /// Copies every head of a `[heads, rows, width]` tensor into a
+    /// `[heads, capacity, width]` tensor, starting at row `first_row`, so
+    /// `output[h, first_row + r] = input[h, r]`.
+    ///
+    /// This adds new keys or values to a KV cache without touching the rows
+    /// already in it.
     ///
     /// # Errors
     ///
-    /// Returns an error when a tensor is on another device, the shapes do not
-    /// agree, or the kernel fails.
-    pub fn concat_rows(
+    /// Returns an error when a tensor is on another device or is not
+    /// contiguous, the heads or widths differ, the rows run past the end of
+    /// `output`, or a copy fails.
+    #[allow(unsafe_code)]
+    pub fn write_rows(
         &self,
         output: &mut Tensor<f32>,
-        first: &Tensor<f32>,
-        second: &Tensor<f32>,
+        first_row: usize,
+        input: &Tensor<f32>,
     ) -> Result<(), BackendError> {
-        let [heads, first_rows, width] = dims("concat_rows", "first", first.shape())?;
-        let [_, second_rows, _] = dims("concat_rows", "second", second.shape())?;
+        let [heads, rows, width] = dims("write_rows", "input", input.shape())?;
+        let [_, capacity, _] = dims("write_rows", "output", output.shape())?;
         expect_shape(
-            "concat_rows",
-            "second",
-            second.shape(),
-            &[heads, second_rows, width],
-        )?;
-        expect_shape(
-            "concat_rows",
+            "write_rows",
             "output",
             output.shape(),
-            &[heads, first_rows + second_rows, width],
+            &[heads, capacity, width],
         )?;
-        self.check_tensors(&[("first", first), ("second", second), ("output", &*output)])?;
+        check_row_range("write_rows", "output", first_row, rows, capacity)?;
+        self.check_tensors(&[("input", input), ("output", &*output)])?;
 
-        let _ = concat_rows_f32(
-            output.partition([1, 1, width]),
-            first,
-            second,
-            first.shape()[1],
-        )
-        .sync_on(&self.stream)
-        .map_err(cutile_error)?;
-        Ok(())
+        let row_bytes = width * size_of::<f32>();
+        self.device.bind_to_thread().map_err(cuda_error)?;
+        // each head is one contiguous block in both tensors, but the output
+        // heads are further apart, so every head is its own copy
+        for head in 0..heads {
+            let output_offset = (head * capacity + first_row) * row_bytes;
+            let input_offset = head * rows * row_bytes;
+
+            // SAFETY: both tensors were checked to be contiguous float32
+            // buffers on this device, the row range was checked to lie inside
+            // every output head, and they stay borrowed until the stream has
+            // been drained below.
+            unsafe {
+                cuda_core::memcpy_dtod_async::<f32>(
+                    device_pointer(output, output_offset),
+                    device_pointer(input, input_offset),
+                    rows * width,
+                    &self.stream,
+                )
+                .map_err(cuda_error)?;
+            }
+        }
+        self.wait_for_stream()
     }
 
     /// Turns `[heads, rows, cols]` attention scores into probabilities.
@@ -504,6 +524,7 @@ impl Backend {
         left: &Tensor<f32>,
         right: &Tensor<f32>,
         right_transposed: bool,
+        right_rows: usize,
         scale: f32,
     ) -> Result<(), BackendError> {
         self.check_tensors(&[("left", left), ("right", right), ("output", &*output)])?;
@@ -512,6 +533,7 @@ impl Backend {
             right.shape(),
             output.shape(),
             right_transposed,
+            right_rows,
         )?;
 
         for head in 0..plan.heads {

@@ -39,6 +39,33 @@ impl Trace {
         Ok(())
     }
 
+    /// Saves the first `rows` rows of every head of a `[heads, capacity, width]`
+    /// tensor, which are the filled rows of a KV cache.
+    pub(crate) fn save_rows(
+        &mut self,
+        backend: &Backend,
+        name: impl Into<String>,
+        tensor: &Tensor<f32>,
+        rows: usize,
+    ) -> Result<()> {
+        if !self.recording {
+            return Ok(());
+        }
+        let shape = tensor.shape();
+        let head =
+            usize::try_from(shape[1] * shape[2]).expect("tensor dimensions are never negative");
+        let width = usize::try_from(shape[2]).expect("tensor dimensions are never negative");
+
+        let values = backend.download(tensor)?;
+        let filled = values
+            .chunks(head)
+            .flat_map(|head| &head[..rows * width])
+            .copied()
+            .collect();
+        self.tensors.push((name.into(), filled));
+        Ok(())
+    }
+
     pub(crate) fn get(&self, name: &str) -> Result<&[f32]> {
         self.tensors
             .iter()

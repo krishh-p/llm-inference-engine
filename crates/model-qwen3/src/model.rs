@@ -1,7 +1,7 @@
 use cuda_backend::{Backend, Tensor};
 
-use crate::attention::KvCache;
 use crate::block::Block;
+use crate::kv_cache::KvCache;
 use crate::trace::Trace;
 use crate::weights::{LayerWeights, load_tensor};
 use crate::{ModelError, Qwen3Artifacts, Qwen3Config, Result};
@@ -55,35 +55,44 @@ impl<'a> Model<'a> {
         })
     }
 
+    /// Allocates an empty cache for every layer, each with room for
+    /// `capacity` tokens.
+    pub(crate) fn new_caches(&self, capacity: usize) -> Result<Vec<KvCache>> {
+        (0..self.blocks.len())
+            .map(|_| KvCache::new(self.backend, &self.config, capacity))
+            .collect()
+    }
+
     /// Runs new tokens through the model and predicts the next token.
     ///
-    /// `caches` has one cache per layer from the tokens so far, and is empty
-    /// for prefill. The result is `[1, vocab_size]` logits and every layer's
-    /// cache extended by the new tokens.
+    /// `caches` has one cache per layer, holding the tokens so far. They are
+    /// empty for prefill, and the new tokens are added to every one. The
+    /// result is `[1, vocab_size]` logits.
     ///
     /// The trace gets `embedding`, each layer's output as `layer_{i}_output`,
     /// then `final_norm` and `logits`.
     pub(crate) fn forward(
         &self,
         token_ids: &[u32],
-        caches: &[KvCache],
+        caches: &mut [KvCache],
         trace: &mut Trace,
-    ) -> Result<(Tensor<f32>, Vec<KvCache>)> {
+    ) -> Result<Tensor<f32>> {
         let backend = self.backend;
         let hidden_size = self.config.hidden_size;
         let rows = token_ids.len();
         self.config.check_token_ids(token_ids)?;
         self.config.check_cache_count(caches.len())?;
+        // checked up front so a full cache fails before any layer has changed
+        for cache in caches.iter() {
+            cache.check_room(rows)?;
+        }
 
         let mut x = self.embed(token_ids)?;
         trace.save(backend, "embedding", &x)?;
 
-        let mut new_caches = Vec::with_capacity(self.blocks.len());
-        for (layer, block) in self.blocks.iter().enumerate() {
-            let (output, cache) = block.forward(&x, rows, caches.get(layer), &mut Trace::off())?;
-            trace.save(backend, format!("layer_{layer}_output"), &output)?;
-            x = output;
-            new_caches.push(cache);
+        for (layer, (block, cache)) in self.blocks.iter().zip(caches.iter_mut()).enumerate() {
+            x = block.forward(&x, rows, cache, &mut Trace::off())?;
+            trace.save(backend, format!("layer_{layer}_output"), &x)?;
         }
 
         // only the last row predicts the next token
@@ -101,8 +110,7 @@ impl<'a> Model<'a> {
         let mut logits = backend.zeros(&[1, self.config.vocab_size])?;
         backend.matmul_transposed(&mut logits, &normalized, &self.embed_tokens)?;
         trace.save(backend, "logits", &logits)?;
-
-        Ok((logits, new_caches))
+        Ok(logits)
     }
 
     /// How many positions the model can attend over.

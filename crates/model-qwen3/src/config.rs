@@ -119,14 +119,13 @@ impl Qwen3Config {
         Ok(())
     }
 
-    /// Checks that a forward pass was given no caches, for prefill, or one
-    /// cache for every layer, for decode.
+    /// Checks that a forward pass was given one cache for every layer.
     ///
     /// # Errors
     ///
     /// Returns an error for any other number of caches.
     pub fn check_cache_count(&self, caches: usize) -> Result<()> {
-        if caches != 0 && caches != self.num_hidden_layers {
+        if caches != self.num_hidden_layers {
             return Err(ModelError::CacheCount {
                 expected: self.num_hidden_layers,
                 actual: caches,
@@ -177,17 +176,17 @@ mod tests {
     }
 
     #[test]
-    fn accepts_no_caches_or_one_per_layer() {
+    fn accepts_one_cache_per_layer() {
         let config: Qwen3Config =
             serde_json::from_str(include_str!("../../../tests/model-config.json")).unwrap();
 
-        assert!(config.check_cache_count(0).is_ok());
         assert!(config.check_cache_count(28).is_ok());
+        assert!(config.check_cache_count(0).is_err());
         assert!(config.check_cache_count(1).is_err());
         let error = config.check_cache_count(29).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "forward pass got 29 KV caches, expected 0 or 28"
+            "forward pass got 29 KV caches, expected 28"
         );
     }
 }
