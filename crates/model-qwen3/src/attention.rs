@@ -1,0 +1,233 @@
+use cuda_backend::{Backend, Tensor, reshape, rope_tables};
+
+use crate::verify::{BoundaryResult, LayerFixture};
+use crate::weights::AttentionWeights;
+use crate::{ModelError, Qwen3Config, Result};
+
+/// Host copies of the tensors a forward pass produced, saved by name so they
+/// can be compared with the reference's trace.
+#[derive(Default)]
+pub(crate) struct Trace {
+    tensors: Vec<(&'static str, Vec<f32>)>,
+}
+
+impl Trace {
+    fn save(&mut self, backend: &Backend, name: &'static str, tensor: &Tensor<f32>) -> Result<()> {
+        self.tensors.push((name, backend.download(tensor)?));
+        Ok(())
+    }
+
+    fn get(&self, name: &str) -> Result<&[f32]> {
+        self.tensors
+            .iter()
+            .find(|(saved, _)| *saved == name)
+            .map(|(_, values)| values.as_slice())
+            .ok_or_else(|| ModelError::MissingTensor(name.to_owned()))
+    }
+}
+
+/// One layer's attention with its weights on the GPU.
+pub(crate) struct Attention<'a> {
+    backend: &'a Backend,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    hidden_size: usize,
+    epsilon: f32,
+    theta: f32,
+    q_proj: Tensor<f32>,
+    k_proj: Tensor<f32>,
+    v_proj: Tensor<f32>,
+    o_proj: Tensor<f32>,
+    q_norm: Tensor<f32>,
+    k_norm: Tensor<f32>,
+}
+
+impl<'a> Attention<'a> {
+    pub(crate) fn new(
+        backend: &'a Backend,
+        config: &Qwen3Config,
+        weights: &AttentionWeights,
+    ) -> Result<Self> {
+        let heads = config.num_attention_heads;
+        let kv_heads = config.num_key_value_heads;
+        let head_dim = config.head_dim;
+        let hidden_size = config.hidden_size;
+
+        Ok(Self {
+            backend,
+            heads,
+            kv_heads,
+            head_dim,
+            hidden_size,
+            epsilon: config.rms_norm_eps,
+            theta: config.rope_theta,
+            q_proj: backend.upload(&weights.q_proj, &[heads * head_dim, hidden_size])?,
+            k_proj: backend.upload(&weights.k_proj, &[kv_heads * head_dim, hidden_size])?,
+            v_proj: backend.upload(&weights.v_proj, &[kv_heads * head_dim, hidden_size])?,
+            o_proj: backend.upload(&weights.o_proj, &[hidden_size, heads * head_dim])?,
+            q_norm: backend.upload(&weights.q_norm, &[head_dim])?,
+            k_norm: backend.upload(&weights.k_norm, &[head_dim])?,
+        })
+    }
+
+    /// Runs attention over a whole prompt, where every token starts at
+    /// `positions[0]` and sees only itself and the tokens before it.
+    ///
+    /// `x` is the normalized layer input, `[rows, hidden_size]`. The result
+    /// has the same shape.
+    pub(crate) fn prefill(
+        &self,
+        x: &Tensor<f32>,
+        positions: &[u32],
+        trace: &mut Trace,
+    ) -> Result<Tensor<f32>> {
+        let backend = self.backend;
+        let rows = positions.len();
+        let (q, k, v) = self.project(x, rows, trace)?;
+
+        let half = self.head_dim / 2;
+        let (cos, sin) = rope_tables(positions, self.head_dim, self.theta);
+        let cos = backend.upload(&cos, &[rows, half])?;
+        let sin = backend.upload(&sin, &[rows, half])?;
+        let q = self.normalize_and_rotate(q, &self.q_norm, self.heads, rows, &cos, &sin)?;
+        let k = self.normalize_and_rotate(k, &self.k_norm, self.kv_heads, rows, &cos, &sin)?;
+        trace.save(backend, "q_rope", &q)?;
+        trace.save(backend, "k_rope", &k)?;
+
+        // rows are the new tokens, columns are the tokens they attend to
+        let mut scores = backend.zeros(&[self.heads, rows, rows])?;
+        backend.matmul_heads_transposed(&mut scores, &q, &k, self.score_scale())?;
+        trace.save(backend, "scores", &scores)?;
+
+        let first_position = positions.first().copied().unwrap_or(0);
+        let first_position = usize::try_from(first_position).expect("positions fit in usize");
+        let mut probs = backend.zeros(&[self.heads, rows, rows])?;
+        backend.causal_softmax(&mut probs, &scores, first_position)?;
+        trace.save(backend, "attention_probs", &probs)?;
+
+        // weighted sum of values, [heads, rows, head_dim]
+        let mut mixed = backend.zeros(&[self.heads, rows, self.head_dim])?;
+        backend.matmul_heads(&mut mixed, &probs, &v)?;
+
+        let merged = self.merge_heads(&mixed, rows)?;
+        let mut output = backend.zeros(&[rows, self.hidden_size])?;
+        backend.matmul_transposed(&mut output, &merged, &self.o_proj)?;
+        trace.save(backend, "attention_output", &output)?;
+        Ok(output)
+    }
+
+    /// Projects the layer input into query, key and value heads.
+    pub(crate) fn project(
+        &self,
+        x: &Tensor<f32>,
+        rows: usize,
+        trace: &mut Trace,
+    ) -> Result<(Tensor<f32>, Tensor<f32>, Tensor<f32>)> {
+        let q = self.project_heads(x, &self.q_proj, rows, self.heads)?;
+        let k = self.project_heads(x, &self.k_proj, rows, self.kv_heads)?;
+        let v = self.project_heads(x, &self.v_proj, rows, self.kv_heads)?;
+        trace.save(self.backend, "q", &q)?;
+        trace.save(self.backend, "k", &k)?;
+        trace.save(self.backend, "v", &v)?;
+        Ok((q, k, v))
+    }
+
+    /// `x @ weight^T`, split into heads: `[rows, hidden_size]` to `[heads, rows, head_dim]`.
+    fn project_heads(
+        &self,
+        x: &Tensor<f32>,
+        weight: &Tensor<f32>,
+        rows: usize,
+        heads: usize,
+    ) -> Result<Tensor<f32>> {
+        let backend = self.backend;
+        let mut projected = backend.zeros(&[rows, heads * self.head_dim])?;
+        backend.matmul_transposed(&mut projected, x, weight)?;
+
+        let by_token = reshape(projected, &[rows, heads, self.head_dim])?;
+        let mut by_head = backend.zeros(&[heads, rows, self.head_dim])?;
+        backend.swap_leading_axes(&mut by_head, &by_token)?;
+        Ok(by_head)
+    }
+
+    /// `[heads, rows, head_dim]` back to `[rows, heads * head_dim]`.
+    fn merge_heads(&self, x: &Tensor<f32>, rows: usize) -> Result<Tensor<f32>> {
+        let mut by_token = self.backend.zeros(&[rows, self.heads, self.head_dim])?;
+        self.backend.swap_leading_axes(&mut by_token, x)?;
+        Ok(reshape(by_token, &[rows, self.heads * self.head_dim])?)
+    }
+
+    /// Applies the per-head `RMSNorm` and then `RoPE` to `[heads, rows, head_dim]`.
+    fn normalize_and_rotate(
+        &self,
+        x: Tensor<f32>,
+        norm_weight: &Tensor<f32>,
+        heads: usize,
+        rows: usize,
+        cos: &Tensor<f32>,
+        sin: &Tensor<f32>,
+    ) -> Result<Tensor<f32>> {
+        let backend = self.backend;
+        let shape = [heads, rows, self.head_dim];
+        let vectors = heads * rows;
+
+        // the norm treats every head of every token as its own row
+        let x = reshape(x, &[vectors, self.head_dim])?;
+        let mut normalized = backend.zeros(&[vectors, self.head_dim])?;
+        backend.rms_norm(&mut normalized, &x, norm_weight, self.epsilon)?;
+
+        let normalized = reshape(normalized, &shape)?;
+        let mut rotated = backend.zeros(&shape)?;
+        backend.rope(&mut rotated, &normalized, cos, sin)?;
+        Ok(rotated)
+    }
+
+    /// `1 / sqrt(head_dim)`, which keeps the scores from growing with the head size.
+    fn score_scale(&self) -> f32 {
+        let head_dim = u16::try_from(self.head_dim).expect("head_dim fits in u16");
+        f32::from(head_dim).sqrt().recip()
+    }
+}
+
+/// Runs layer 0 on both fixtures and compares every traced tensor.
+pub(crate) fn verify(
+    config: &Qwen3Config,
+    weights: &AttentionWeights,
+    positions: &[u32],
+    prefill: &LayerFixture,
+    decode: &LayerFixture,
+) -> Result<Vec<BoundaryResult>> {
+    let backend = Backend::new()?;
+    let attention = Attention::new(&backend, config, weights)?;
+    let mut results = Vec::new();
+
+    let mut trace = Trace::default();
+    let x = backend.upload(&prefill.input, &[prefill.rows, config.hidden_size])?;
+    attention.prefill(&x, positions, &mut trace)?;
+    compare(prefill, &trace, &mut results)?;
+
+    let mut trace = Trace::default();
+    let x = backend.upload(&decode.input, &[decode.rows, config.hidden_size])?;
+    attention.project(&x, decode.rows, &mut trace)?;
+    compare(decode, &trace, &mut results)?;
+
+    Ok(results)
+}
+
+fn compare(fixture: &LayerFixture, trace: &Trace, results: &mut Vec<BoundaryResult>) -> Result<()> {
+    for expected in &fixture.expected {
+        let name = format!("{}_{}", fixture.name, expected.name);
+        let actual = trace.get(expected.name)?;
+        let max_abs_error = expected
+            .tolerance
+            .compare(&name, actual, &expected.values)?;
+
+        results.push(BoundaryResult {
+            name,
+            max_abs_error,
+            tolerance: expected.tolerance,
+        });
+    }
+    Ok(())
+}

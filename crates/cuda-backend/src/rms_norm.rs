@@ -31,6 +31,13 @@ pub(crate) struct RmsNormFixtures {
     pub bf16_cases: Vec<RmsNormBf16Case>,
 }
 
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) fn inverse_hidden_size(hidden_size: usize) -> f32 {
+    let hidden_size =
+        u16::try_from(hidden_size).expect("validated RMSNorm hidden size fits in u16");
+    f32::from(hidden_size).recip()
+}
+
 pub(crate) fn load_fixtures(path: &Path) -> Result<RmsNormFixtures, BackendError> {
     let catalog = SafeTensorCatalog::open_files([path.to_path_buf()])?;
     let epsilon = load_epsilon(&catalog)?;

@@ -71,22 +71,78 @@ pub(crate) fn plan_gemm(
     })
 }
 
-/// Checks that a matrix lives on the device the backend runs on.
+/// One GEMM per head of a `[heads, rows, cols]` tensor.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeadGemm {
+    pub call: GemmCall,
+    pub heads: usize,
+    /// How many left heads share each right head.
+    pub group: usize,
+    /// Elements in one head of each tensor.
+    pub left_elements: usize,
+    pub right_elements: usize,
+    pub output_elements: usize,
+}
+
+/// Plans `output[h] = left[h] @ right[h / group]` for every head `h`, with the
+/// right matrices optionally transposed.
 ///
 /// # Errors
 ///
-/// Returns an error naming the matrix when the two devices differ.
+/// Returns an error when a shape is not three-dimensional, the left heads are
+/// not a multiple of the right heads, or the matrices in each head do not agree.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) fn plan_head_gemm(
+    left: &[i32],
+    right: &[i32],
+    output: &[i32],
+    right_transposed: bool,
+) -> Result<HeadGemm, BackendError> {
+    let mismatch = || BackendError::MatmulShape {
+        left: left.to_vec(),
+        right: right.to_vec(),
+        output: output.to_vec(),
+        right_transposed,
+    };
+
+    let (&[heads, ..], &[right_heads, ..], &[output_heads, ..]) = (left, right, output) else {
+        return Err(mismatch());
+    };
+    if left.len() != 3 || right.len() != 3 || output.len() != 3 {
+        return Err(mismatch());
+    }
+    if right_heads <= 0 || heads % right_heads != 0 || output_heads != heads {
+        return Err(mismatch());
+    }
+    let call = plan_gemm(&left[1..], &right[1..], &output[1..], right_transposed)
+        .map_err(|_| mismatch())?;
+
+    let elements = |shape: &[i32]| {
+        usize::try_from(shape[1] * shape[2]).expect("plan_gemm checked the dimensions are positive")
+    };
+    Ok(HeadGemm {
+        call,
+        heads: usize::try_from(heads).expect("checked to be positive"),
+        group: usize::try_from(heads / right_heads).expect("checked to be positive"),
+        left_elements: elements(left),
+        right_elements: elements(right),
+        output_elements: elements(output),
+    })
+}
+
+/// Checks that a tensor lives on the device the backend runs on.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn check_device(
     name: &'static str,
-    matrix_device: usize,
+    tensor_device: usize,
     backend_device: usize,
 ) -> Result<(), BackendError> {
-    if matrix_device != backend_device {
+    if tensor_device != backend_device {
         return Err(BackendError::WrongDevice {
             name,
             expected: backend_device,
-            actual: matrix_device,
+            actual: tensor_device,
         });
     }
     Ok(())
@@ -198,17 +254,49 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_matrix_on_the_backend_device() {
+    fn plans_attention_scores_with_shared_key_heads() {
+        // q [16, 5, 128] @ k [8, 5, 128]^T -> [16, 5, 5]
+        let plan = plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[16, 5, 5], true).unwrap();
+
+        assert_eq!(
+            plan.call,
+            plan_gemm(&[5, 128], &[5, 128], &[5, 5], true).unwrap()
+        );
+        assert_eq!(plan.heads, 16);
+        assert_eq!(plan.group, 2);
+        assert_eq!(plan.left_elements, 640);
+        assert_eq!(plan.right_elements, 640);
+        assert_eq!(plan.output_elements, 25);
+    }
+
+    #[test]
+    fn rejects_heads_that_do_not_divide_evenly() {
+        assert!(matches!(
+            plan_head_gemm(&[16, 5, 128], &[6, 5, 128], &[16, 5, 5], true),
+            Err(BackendError::MatmulShape { .. })
+        ));
+        assert!(matches!(
+            plan_head_gemm(&[16, 5, 128], &[8, 5, 128], &[8, 5, 5], true),
+            Err(BackendError::MatmulShape { .. })
+        ));
+        assert!(matches!(
+            plan_head_gemm(&[5, 128], &[5, 128], &[5, 5], true),
+            Err(BackendError::MatmulShape { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_a_tensor_on_the_backend_device() {
         assert!(check_device("left", 0, 0).is_ok());
     }
 
     #[test]
-    fn rejects_a_matrix_on_another_device() {
+    fn rejects_a_tensor_on_another_device() {
         let error = check_device("right", 1, 0).unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "matmul right matrix is on CUDA device 1, but the backend uses device 0"
+            "right tensor is on CUDA device 1, but the backend uses device 0"
         );
     }
 

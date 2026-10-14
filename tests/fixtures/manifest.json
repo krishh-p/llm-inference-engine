@@ -247,6 +247,22 @@
           ],
           "dtype": "float32"
         },
+        "scores": {
+          "shape": [
+            16,
+            5,
+            5
+          ],
+          "dtype": "float32"
+        },
+        "attention_probs": {
+          "shape": [
+            16,
+            5,
+            5
+          ],
+          "dtype": "float32"
+        },
         "attention_output": {
           "shape": [
             5,
@@ -278,10 +294,18 @@
       },
       "tolerances": {
         "projection_atol": 1e-05,
-        "projection_rtol": 1e-05
+        "projection_rtol": 1e-05,
+        "rope_atol": 1e-05,
+        "rope_rtol": 1e-05,
+        "scores_atol": 0.0001,
+        "scores_rtol": 1e-05,
+        "probs_atol": 1e-05,
+        "probs_rtol": 1e-05,
+        "attention_output_atol": 1e-05,
+        "attention_output_rtol": 1e-05
       },
-      "bytes": 389936,
-      "sha256": "ffa21b569be323b3f7bf55618d57210c329e6d01dc03ac5f01617391152e66b4"
+      "bytes": 393288,
+      "sha256": "66bf6ef66e684f62886aee4bc5f6290200dcf8fc1eb022a6d07bfdf0c0c144cd"
     },
     "decode_block_0.safetensors": {
       "tensors": {
@@ -383,6 +407,22 @@
           ],
           "dtype": "float32"
         },
+        "scores": {
+          "shape": [
+            16,
+            1,
+            6
+          ],
+          "dtype": "float32"
+        },
+        "attention_probs": {
+          "shape": [
+            16,
+            1,
+            6
+          ],
+          "dtype": "float32"
+        },
         "attention_output": {
           "shape": [
             1,
@@ -414,10 +454,18 @@
       },
       "tolerances": {
         "projection_atol": 1e-05,
-        "projection_rtol": 1e-05
+        "projection_rtol": 1e-05,
+        "rope_atol": 1e-05,
+        "rope_rtol": 1e-05,
+        "scores_atol": 0.0001,
+        "scores_rtol": 1e-05,
+        "probs_atol": 1e-05,
+        "probs_rtol": 1e-05,
+        "attention_output_atol": 1e-05,
+        "attention_output_rtol": 1e-05
       },
-      "bytes": 169200,
-      "sha256": "e5397576078a4e6ea34f9619d6a05ad78ad69509998d9d02a9b9784482c9193d"
+      "bytes": 170120,
+      "sha256": "9c9a27d735d7616b785e4d0266e1d0acfba2b36e41f5a7e715f56dce64bf7654"
     },
     "generation.safetensors": {
       "tensors": {

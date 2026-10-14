@@ -33,10 +33,10 @@ pub(crate) struct RopeFixtures {
 /// Column `i` turns at frequency `theta^(-i / half)`, so the first columns
 /// turn quickly and the last ones slowly. The arithmetic is float32 to follow
 /// the Python reference.
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 // Positions and column indexes are far below 2^24, so float32 holds them exactly.
 #[allow(clippy::cast_precision_loss)]
-pub(crate) fn rope_tables(positions: &[u32], head_dim: usize, theta: f32) -> (Vec<f32>, Vec<f32>) {
+#[must_use]
+pub fn rope_tables(positions: &[u32], head_dim: usize, theta: f32) -> (Vec<f32>, Vec<f32>) {
     let half = head_dim / 2;
     let mut cos = Vec::with_capacity(positions.len() * half);
     let mut sin = Vec::with_capacity(positions.len() * half);
@@ -54,10 +54,6 @@ pub(crate) fn rope_tables(positions: &[u32], head_dim: usize, theta: f32) -> (Ve
 }
 
 /// Compares the tables generated here with the ones the reference recorded.
-///
-/// # Errors
-///
-/// Returns an error when either table is outside the fixture tolerance.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn check_tables(fixtures: &RopeFixtures) -> Result<RopeTableResult, BackendError> {
     let (cos, sin) = rope_tables(&fixtures.positions, fixtures.head_dim, fixtures.theta);

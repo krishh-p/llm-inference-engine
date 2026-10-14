@@ -3,8 +3,10 @@
 
 #[cfg(feature = "cuda")]
 pub use kernels::{
+    causal_softmax_kernel::causal_softmax_f32,
     rms_norm_kernel::{rms_norm_bf16, rms_norm_f32},
     rope_kernel::rope_f32,
+    swap_leading_axes_kernel::swap_leading_axes_f32,
     vector_add_kernel::vector_add,
 };
 
@@ -65,32 +67,88 @@ mod kernels {
         #[allow(clippy::wildcard_imports)]
         use cutile::core::*;
 
-        /// Rotates one token of one head. The tile holds the two halves of
-        /// its vector as two rows, and row `i` of the first half pairs with
-        /// row `i` of the second.
+        /// Rotates one half of one token's vector. Element `i` of the first
+        /// half pairs with element `i` of the second, so each tile reads its
+        /// own half and the other one.
         #[cutile::entry()]
         pub fn rope_f32<const HALF: i32>(
-            output: &mut Tensor<f32, { [1, 2, HALF] }>,
+            output: &mut Tensor<f32, { [1, 1, HALF] }>,
             input: &Tensor<f32, { [-1, -1, -1] }>,
             cos: &Tensor<f32, { [-1, -1] }>,
             sin: &Tensor<f32, { [-1, -1] }>,
         ) {
-            let x: Tile<f32, { [1, 2, HALF] }> = load_tile_like(input, output);
-            let first: Tile<i32, { [] }> = scalar_to_tile(0i32);
-            let second: Tile<i32, { [] }> = scalar_to_tile(1i32);
-            let a: Tile<f32, { [1, 1, HALF] }> = extract(x, [first, first, first]);
-            let b: Tile<f32, { [1, 1, HALF] }> = extract(x, [first, second, first]);
+            let block: (i32, i32, i32) = get_tile_block_id();
+            let own: Tile<f32, { [1, 1, HALF] }> =
+                load_tile(input, shape![1, 1, HALF], [block.0, block.1, block.2]);
+            let other: Tile<f32, { [1, 1, HALF] }> = load_tile(
+                input,
+                shape![1, 1, HALF],
+                [block.0, block.1, 1i32 - block.2],
+            );
 
             // The tables have one row per token, shared by every head.
-            let block: (i32, i32, i32) = get_tile_block_id();
             let cos: Tile<f32, { [1, HALF] }> = load_tile(cos, shape![1, HALF], [block.1, 0i32]);
             let sin: Tile<f32, { [1, HALF] }> = load_tile(sin, shape![1, HALF], [block.1, 0i32]);
             let cos = cos.reshape(shape![1, 1, HALF]);
             let sin = sin.reshape(shape![1, 1, HALF]);
 
-            let rotated: Tile<f32, { [1, 2, HALF] }> =
-                cat(a * cos - b * sin, b * cos + a * sin, 1i32);
-            output.store(rotated);
+            // first half: a * cos - b * sin, second half: b * cos + a * sin
+            let direction: f32 = convert_scalar::<f32>(2i32 * block.2 - 1i32);
+            let direction: Tile<f32, { [1, 1, HALF] }> =
+                broadcast_scalar(direction, shape![1, 1, HALF]);
+            output.store(own * cos + other * sin * direction);
+        }
+    }
+
+    #[cutile::module]
+    pub mod swap_leading_axes_kernel {
+        #[allow(clippy::wildcard_imports)]
+        use cutile::core::*;
+
+        /// Copies `input[b, a, :]` to `output[a, b, :]`.
+        #[cutile::entry()]
+        pub fn swap_leading_axes_f32<const D: i32>(
+            output: &mut Tensor<f32, { [1, 1, D] }>,
+            input: &Tensor<f32, { [-1, -1, -1] }>,
+        ) {
+            let block: (i32, i32, i32) = get_tile_block_id();
+            let x: Tile<f32, { [1, 1, D] }> =
+                load_tile(input, shape![1, 1, D], [block.1, block.0, 0i32]);
+            output.store(x);
+        }
+    }
+
+    #[cutile::module]
+    pub mod causal_softmax_kernel {
+        #[allow(clippy::wildcard_imports)]
+        use cutile::core::*;
+
+        /// Softmax over one row of attention scores. Row `r` belongs to the
+        /// token at `first_position + r`, which may only see columns up to
+        /// its own position.
+        #[cutile::entry()]
+        pub fn causal_softmax_f32<const N: i32>(
+            output: &mut Tensor<f32, { [1, 1, N] }>,
+            scores: &Tensor<f32, { [-1, -1, -1] }>,
+            first_position: i32,
+        ) {
+            let block: (i32, i32, i32) = get_tile_block_id();
+            let x: Tile<f32, { [1, 1, N] }> = load_tile_like(scores, output);
+
+            let column: Tile<i32, { [N] }> = iota(shape![N]);
+            let column = column.reshape(shape![1, 1, N]);
+            let last_visible: Tile<i32, { [1, 1, N] }> =
+                broadcast_scalar(first_position + block.1, shape![1, 1, N]);
+            let visible: Tile<bool, { [1, 1, N] }> = le_tile(column, last_visible);
+            let hidden: Tile<f32, { [1, 1, N] }> = constant(f32::NEG_INFINITY, shape![1, 1, N]);
+            let x = select(visible, x, hidden);
+
+            let max: Tile<f32, { [1, 1] }> = reduce_max(x, 2);
+            let max = max.reshape(shape![1, 1, 1]).broadcast(shape![1, 1, N]);
+            let weight = exp(x - max);
+            let sum: Tile<f32, { [1, 1] }> = reduce_sum(weight, 2);
+            let sum = sum.reshape(shape![1, 1, 1]).broadcast(shape![1, 1, N]);
+            output.store(weight / sum);
         }
     }
 

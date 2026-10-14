@@ -17,8 +17,14 @@ ROPE_TABLE_ATOL = 1e-3
 ROPE_TABLE_RTOL = 0.0
 RMS_NORM_FLOAT32_ATOL = 1e-5
 RMS_NORM_BFLOAT16_ATOL = 1e-2
-PROJECTION_ATOL = 1e-5
-PROJECTION_RTOL = 1e-5
+# allowed error is atol + rtol * |expected|, one pair per stage of the block
+BLOCK_TOLERANCES = {
+    "projection": (1e-5, 1e-5),
+    "rope": (1e-5, 1e-5),
+    "scores": (1e-4, 1e-5),
+    "probs": (1e-5, 1e-5),
+    "attention_output": (1e-5, 1e-5),
+}
 
 SOURCE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = modal_common.find_project_root(__file__)
@@ -226,6 +232,8 @@ def build_fixtures() -> dict[str, object]:
             "v": trace[layer + "v"],
             "q_rope": trace[layer + "q_rope"],
             "k_rope": trace[layer + "k_rope"],
+            "scores": trace[layer + "scores"],
+            "attention_probs": trace[layer + "attention_probs"],
             "attention_output": trace[layer + "attention_output"],
             "mlp_input": trace[layer + "mlp_input"],
             "mlp_output": trace[layer + "mlp_output"],
@@ -245,6 +253,8 @@ def build_fixtures() -> dict[str, object]:
             "cache_v_in": decode_trace[layer + "cache_v_in"],
             "cache_k_out": decode_trace[layer + "cache_k_out"],
             "cache_v_out": decode_trace[layer + "cache_v_out"],
+            "scores": decode_trace[layer + "scores"],
+            "attention_probs": decode_trace[layer + "attention_probs"],
             "attention_output": decode_trace[layer + "attention_output"],
             "mlp_input": decode_trace[layer + "mlp_input"],
             "mlp_output": decode_trace[layer + "mlp_output"],
@@ -272,10 +282,11 @@ def build_fixtures() -> dict[str, object]:
         "bfloat16_atol": RMS_NORM_BFLOAT16_ATOL,
     }
     for filename in ("block_0.safetensors", "decode_block_0.safetensors"):
-        file_info[filename]["tolerances"] = {
-            "projection_atol": PROJECTION_ATOL,
-            "projection_rtol": PROJECTION_RTOL,
-        }
+        tolerances = {}
+        for stage, (atol, rtol) in BLOCK_TOLERANCES.items():
+            tolerances[f"{stage}_atol"] = atol
+            tolerances[f"{stage}_rtol"] = rtol
+        file_info[filename]["tolerances"] = tolerances
 
     manifest = {
         "format_version": 1,

@@ -2,6 +2,57 @@ use std::path::PathBuf;
 
 use engine_core::{DType, FixtureManifest, SafeTensorCatalog};
 
+// The tensors the Rust checks read from each fixture file.
+const REQUIRED_TENSORS: [(&str, &[&str]); 5] = [
+    (
+        "block_0.safetensors",
+        &[
+            "input_norm",
+            "q",
+            "k",
+            "v",
+            "q_rope",
+            "k_rope",
+            "scores",
+            "attention_probs",
+            "attention_output",
+        ],
+    ),
+    ("decode_block_0.safetensors", &["input_norm", "q", "k", "v"]),
+    ("generation.safetensors", &["final_norm", "prefill_logits"]),
+    (
+        "rms_norm.safetensors",
+        &[
+            "input",
+            "weight",
+            "eps",
+            "output",
+            "q_input",
+            "q_weight",
+            "q_output",
+            "bf16_input",
+            "bf16_weight",
+            "bf16_output",
+            "wide_input",
+            "wide_weight",
+            "wide_output",
+        ],
+    ),
+    (
+        "rope.safetensors",
+        &[
+            "q_input",
+            "k_input",
+            "positions",
+            "theta",
+            "cos",
+            "sin",
+            "q_output",
+            "k_output",
+        ],
+    ),
+];
+
 fn fixture_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
 }
@@ -10,25 +61,35 @@ fn fixture_directory() -> PathBuf {
 fn committed_fixture_manifest_matches_its_files() {
     let directory = fixture_directory();
     let manifest = FixtureManifest::load(directory.join("manifest.json")).unwrap();
+
+    // checks every file's size, checksum and tensor metadata
     let validation = manifest.validate_files(&directory).unwrap();
 
-    assert_eq!(validation.file_count, 5);
-    assert_eq!(validation.tensor_count, 51);
-    assert_eq!(validation.total_bytes, 1_571_048);
-    assert_eq!(
-        manifest
+    assert_eq!(validation.file_count, REQUIRED_TENSORS.len());
+}
+
+#[test]
+fn manifest_lists_every_required_tensor() {
+    let manifest = FixtureManifest::load(fixture_directory().join("manifest.json")).unwrap();
+
+    for (file, tensors) in REQUIRED_TENSORS {
+        let recorded = &manifest
             .files
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec![
-            "block_0.safetensors",
-            "decode_block_0.safetensors",
-            "generation.safetensors",
-            "rms_norm.safetensors",
-            "rope.safetensors",
-        ]
-    );
+            .get(file)
+            .unwrap_or_else(|| panic!("{file} is missing from the manifest"))
+            .tensors;
+        for tensor in tensors {
+            assert!(recorded.contains_key(*tensor), "{file} has no {tensor}");
+        }
+    }
+}
+
+#[test]
+fn fixtures_were_generated_from_the_pinned_revision() {
+    let manifest = FixtureManifest::load(fixture_directory().join("manifest.json")).unwrap();
+    let pinned = include_str!("../../../model_revision.txt").trim();
+
+    assert_eq!(manifest.model.revision, pinned);
 }
 
 #[test]

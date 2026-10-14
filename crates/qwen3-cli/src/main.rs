@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use engine_core::FixtureManifest;
-use model_qwen3::{ModelError, Qwen3Artifacts, RegressionPromptSet, verify_projections};
+use model_qwen3::{ModelError, Qwen3Artifacts, RegressionPromptSet, verify_layer_0};
 use thiserror::Error;
 
 const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-1.7B-Base";
@@ -40,7 +40,7 @@ enum Command {
         model_id: String,
     },
 
-    /// Run layer 0's Q, K and V projections on the GPU and compare them with the golden fixtures.
+    /// Run layer 0's attention on the GPU and compare it with the golden fixtures.
     Verify {
         /// Directory containing config.json, tokenizer.json and `SafeTensors` weights.
         #[arg(long)]
@@ -168,19 +168,15 @@ fn inspect(
 
 fn verify(model_dir: &Path, fixture_dir: &Path) -> Result<(), CliError> {
     let artifacts = Qwen3Artifacts::open(model_dir)?;
-    let results = verify_projections(&artifacts, fixture_dir)?;
+    let results = verify_layer_0(&artifacts, fixture_dir)?;
 
     for result in &results {
         println!(
-            "{}: shape={:?}, max_abs_error={}, atol={}, rtol={}",
-            result.name,
-            result.shape,
-            result.max_abs_error,
-            result.tolerance.atol,
-            result.tolerance.rtol
+            "{}: max_abs_error={}, atol={}, rtol={}",
+            result.name, result.max_abs_error, result.tolerance.atol, result.tolerance.rtol
         );
     }
-    println!("projection checks passed: {}", results.len());
+    println!("layer 0 checks passed: {}", results.len());
     Ok(())
 }
 

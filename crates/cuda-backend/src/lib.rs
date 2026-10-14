@@ -7,6 +7,7 @@ use thiserror::Error;
 mod matmul;
 mod rms_norm;
 mod rope;
+mod shapes;
 
 #[cfg(feature = "cuda")]
 mod backend;
@@ -16,9 +17,10 @@ mod cublas;
 mod gpu;
 
 #[cfg(feature = "cuda")]
-pub use backend::Backend;
+pub use backend::{Backend, reshape};
 #[cfg(feature = "cuda")]
 pub use cutile::tensor::Tensor;
+pub use rope::rope_tables;
 
 const VECTOR_ELEMENTS: usize = 4096;
 const VECTOR_TILE_ELEMENTS: usize = 256;
@@ -74,7 +76,6 @@ pub struct KernelBenchmark {
     pub launches_per_iteration: usize,
 }
 
-/// `RMSNorm` correctness results.
 #[derive(Debug, Serialize)]
 pub struct RmsNormResult {
     pub cases: Vec<RmsNormCaseResult>,
@@ -92,7 +93,6 @@ pub struct MatmulCaseResult {
     pub passed: bool,
 }
 
-/// cuBLAS matrix multiplication results.
 #[derive(Debug, Serialize)]
 pub struct MatmulResult {
     pub cases: Vec<MatmulCaseResult>,
@@ -120,14 +120,12 @@ pub struct RopeCaseResult {
     pub passed: bool,
 }
 
-/// `RoPE` table and kernel results.
 #[derive(Debug, Serialize)]
 pub struct RopeResult {
     pub tables: RopeTableResult,
     pub cases: Vec<RopeCaseResult>,
 }
 
-/// Complete output from the Rust CUDA smoke test.
 #[derive(Debug, Serialize)]
 pub struct SmokeReport {
     pub gpu: GpuInfo,
@@ -138,7 +136,6 @@ pub struct SmokeReport {
     pub matmul: MatmulResult,
 }
 
-/// Errors raised while checking the CUDA runtime or running a kernel.
 #[derive(Debug, Error)]
 pub enum BackendError {
     #[error("element count must be a non-zero multiple of {VECTOR_TILE_ELEMENTS}, got {0}")]
@@ -162,12 +159,26 @@ pub enum BackendError {
         right_transposed: bool,
     },
 
-    #[error("matmul needs a contiguous row-major {0} matrix")]
-    NonContiguousMatrix(&'static str),
+    #[error("{operation} {name} has shape {actual:?}, expected {expected:?}")]
+    Shape {
+        operation: &'static str,
+        name: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<i32>,
+    },
 
-    #[error(
-        "matmul {name} matrix is on CUDA device {actual}, but the backend uses device {expected}"
-    )]
+    #[error("{operation} {name} has shape {actual:?}, expected {expected} dimensions")]
+    Rank {
+        operation: &'static str,
+        name: &'static str,
+        expected: usize,
+        actual: Vec<i32>,
+    },
+
+    #[error("{0} tensor must be contiguous and row-major")]
+    NonContiguous(&'static str),
+
+    #[error("{name} tensor is on CUDA device {actual}, but the backend uses device {expected}")]
     WrongDevice {
         name: &'static str,
         expected: usize,

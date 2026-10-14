@@ -106,6 +106,7 @@ def attention(x, positions, cached, weights, p, cfg, trace=None, trace_prefix=""
 
     # rows are new tokens, columns are the tokens they attend to
     scores = q @ k.transpose(-1, -2) / q.shape[-1] ** 0.5  # [16, n_new, n]
+    save_trace(trace, trace_prefix + "scores", scores)
 
     # hide future tokens during prefill. decode has nothing to hide
     key_positions = torch.arange(k.shape[1], device=x.device)
@@ -114,6 +115,7 @@ def attention(x, positions, cached, weights, p, cfg, trace=None, trace_prefix=""
 
     # hugging face does the softmax in float32 too
     attn = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+    save_trace(trace, trace_prefix + "attention_probs", attn)
     z = attn @ v  # weighted sum of values, [16, n_new, 128]
 
     out = merge_heads(z) @ weights[p + "o_proj.weight"].T  # [n_new, 2048]

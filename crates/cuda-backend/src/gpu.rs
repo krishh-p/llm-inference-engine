@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use cuda_core::{Device, Stream, get_device_sm_name};
-use cuda_kernels::{rms_norm_bf16, rms_norm_f32, rope_f32, vector_add};
+use cuda_kernels::{rms_norm_bf16, vector_add};
 use cutile::half::bf16;
 use cutile::prelude::*;
 
 use crate::backend::Backend;
 use crate::matmul::reference;
-use crate::rms_norm::{RmsNormBf16Case, RmsNormF32Case, RmsNormFixtures};
+use crate::rms_norm::{RmsNormBf16Case, RmsNormF32Case, RmsNormFixtures, inverse_hidden_size};
 use crate::rope::{RopeCase, RopeFixtures, check_tables};
+use crate::shapes::dims;
 use crate::{
     BackendError, GpuInfo, KernelBenchmark, MatmulCaseResult, MatmulResult, RmsNormCaseResult,
     RmsNormResult, RopeCaseResult, RopeResult, SmokeReport, VECTOR_ELEMENTS, VECTOR_TILE_ELEMENTS,
@@ -62,8 +63,8 @@ pub(super) fn run_smoke(
     let compute_capability = compute_capability(&backend.device)?;
 
     let vector_add = run_vector_add(&backend.stream)?;
-    let rms_norm = run_rms_norm_suite(&backend.stream, rms_norm_fixtures)?;
-    let rope = run_rope_suite(&backend.stream, rope_fixtures)?;
+    let rms_norm = run_rms_norm_suite(&backend, rms_norm_fixtures)?;
+    let rope = run_rope_suite(&backend, rope_fixtures)?;
     let matmul = run_matmul_suite(&backend)?;
 
     Ok(SmokeReport {
@@ -153,24 +154,24 @@ fn run_vector_add(stream: &Arc<Stream>) -> Result<VectorAddResult, BackendError>
 }
 
 fn run_rms_norm_suite(
-    stream: &Arc<Stream>,
+    backend: &Backend,
     fixtures: RmsNormFixtures,
 ) -> Result<RmsNormResult, BackendError> {
     let case_count = fixtures.f32_cases.len() + fixtures.bf16_cases.len();
     let mut cases = Vec::with_capacity(case_count);
 
     for case in fixtures.f32_cases {
-        cases.push(run_rms_norm_f32(stream, case, fixtures.epsilon)?);
+        cases.push(run_rms_norm_f32(backend, case, fixtures.epsilon)?);
     }
     for case in fixtures.bf16_cases {
-        cases.push(run_rms_norm_bf16(stream, case, fixtures.epsilon)?);
+        cases.push(run_rms_norm_bf16(&backend.stream, case, fixtures.epsilon)?);
     }
 
     Ok(RmsNormResult { cases })
 }
 
 fn run_rms_norm_f32(
-    stream: &Arc<Stream>,
+    backend: &Backend,
     case: RmsNormF32Case,
     epsilon: f32,
 ) -> Result<RmsNormCaseResult, BackendError> {
@@ -183,26 +184,15 @@ fn run_rms_norm_f32(
         expected,
     } = case;
     check_rms_norm_shape(rows, hidden_size)?;
-    let params = RmsNormParams::new(rows, hidden_size, epsilon);
-    let input_host = Arc::new(input);
-    let weight_host = Arc::new(weight);
 
-    let input = api::copy_host_vec_to_device(&input_host)
-        .sync_on(stream)
-        .map_err(cutile_error)?
-        .reshape(&[rows, hidden_size])
-        .map_err(cutile_error)?;
-    let weight = api::copy_host_vec_to_device(&weight_host)
-        .sync_on(stream)
-        .map_err(cutile_error)?;
-    let mut output = api::zeros::<f32>(&[rows, hidden_size])
-        .sync_on(stream)
-        .map_err(cutile_error)?;
+    let input = backend.upload(&input, &[rows, hidden_size])?;
+    let weight = backend.upload(&weight, &[hidden_size])?;
+    let mut output = backend.zeros(&[rows, hidden_size])?;
 
-    launch_rms_norm_f32(stream, &mut output, &input, &weight, &params)?;
-    let benchmark = benchmark_rms_norm_f32(stream, &mut output, &input, &weight, &params)?;
+    backend.rms_norm(&mut output, &input, &weight, epsilon)?;
+    let benchmark = benchmark_rms_norm_f32(backend, &mut output, &input, &weight, epsilon)?;
 
-    let actual = output.to_host_vec().sync_on(stream).map_err(cutile_error)?;
+    let actual = backend.download(&output)?;
     let max_abs_error = verify(name, &actual, &expected, F32_TOLERANCE)?;
 
     Ok(RmsNormCaseResult {
@@ -288,54 +278,39 @@ fn run_rms_norm_bf16(
     })
 }
 
-fn run_rope_suite(
-    stream: &Arc<Stream>,
-    fixtures: &RopeFixtures,
-) -> Result<RopeResult, BackendError> {
+fn run_rope_suite(backend: &Backend, fixtures: &RopeFixtures) -> Result<RopeResult, BackendError> {
     let tables = check_tables(fixtures)?;
 
     // The kernel is checked with the reference tables, so its tolerance does
     // not have to absorb the difference between the two sets of tables.
     let rows = fixtures.positions.len();
     let half = fixtures.head_dim / 2;
-    let cos = upload_rope_table(stream, &fixtures.cos, rows, half)?;
-    let sin = upload_rope_table(stream, &fixtures.sin, rows, half)?;
+    let cos = backend.upload(&fixtures.cos, &[rows, half])?;
+    let sin = backend.upload(&fixtures.sin, &[rows, half])?;
 
     let mut cases = Vec::with_capacity(fixtures.cases.len());
     for case in &fixtures.cases {
-        cases.push(run_rope_case(stream, fixtures, case, &cos, &sin)?);
+        cases.push(run_rope_case(backend, fixtures, case, &cos, &sin)?);
     }
 
     Ok(RopeResult { tables, cases })
 }
 
 fn run_rope_case(
-    stream: &Arc<Stream>,
+    backend: &Backend,
     fixtures: &RopeFixtures,
     case: &RopeCase,
     cos: &Tensor<f32>,
     sin: &Tensor<f32>,
 ) -> Result<RopeCaseResult, BackendError> {
     let rows = fixtures.positions.len();
-    let half = fixtures.head_dim / 2;
+    let shape = [case.heads, rows, fixtures.head_dim];
+    let input = backend.upload(&case.input, &shape)?;
+    let mut output = backend.zeros(&shape)?;
 
-    // [heads, rows, head_dim] is viewed as [heads, rows * 2, half], which is
-    // the same memory with the two halves of every vector on separate rows.
-    let shape = [case.heads, rows * 2, half];
-    let input = api::copy_host_vec_to_device(&Arc::new(case.input.clone()))
-        .sync_on(stream)
-        .map_err(cutile_error)?
-        .reshape(&shape)
-        .map_err(cutile_error)?;
-    let mut output = api::zeros::<f32>(&shape)
-        .sync_on(stream)
-        .map_err(cutile_error)?;
+    backend.rope(&mut output, &input, cos, sin)?;
 
-    let _ = rope_f32((&mut output).partition([1, 2, half]), &input, cos, sin)
-        .sync_on(stream)
-        .map_err(cutile_error)?;
-
-    let actual = output.to_host_vec().sync_on(stream).map_err(cutile_error)?;
+    let actual = backend.download(&output)?;
     let tolerance = fixtures.rotation_tolerance;
     let max_abs_error = tolerance.compare(case.name, &actual, &case.expected)?;
 
@@ -348,19 +323,6 @@ fn run_rope_case(
         tolerance,
         passed: true,
     })
-}
-
-fn upload_rope_table(
-    stream: &Arc<Stream>,
-    table: &[f32],
-    rows: usize,
-    half: usize,
-) -> Result<Tensor<f32>, BackendError> {
-    api::copy_host_vec_to_device(&Arc::new(table.to_vec()))
-        .sync_on(stream)
-        .map_err(cutile_error)?
-        .reshape(&[rows, half])
-        .map_err(cutile_error)
 }
 
 fn run_matmul_suite(backend: &Backend) -> Result<MatmulResult, BackendError> {
@@ -392,9 +354,9 @@ fn run_matmul_case(
     let right_host = counting(7, inner * cols);
     let expected = reference(&left_host, &right_host, rows, inner, cols, right_transposed);
 
-    let left = backend.upload_matrix(&left_host, [rows, inner])?;
-    let right = backend.upload_matrix(&right_host, right_shape)?;
-    let mut output = backend.zeros_matrix([rows, cols])?;
+    let left = backend.upload(&left_host, &[rows, inner])?;
+    let right = backend.upload(&right_host, &right_shape)?;
+    let mut output = backend.zeros(&[rows, cols])?;
 
     if right_transposed {
         backend.matmul_transposed(&mut output, &left, &right)?;
@@ -402,7 +364,7 @@ fn run_matmul_case(
         backend.matmul(&mut output, &left, &right)?;
     }
 
-    let actual = backend.download(output)?;
+    let actual = backend.download(&output)?;
     let max_abs_error = verify(name, &actual, &expected, MATMUL_MAX_ABS_ERROR)?;
 
     Ok(MatmulCaseResult {
@@ -449,8 +411,8 @@ fn run_kernel_matmul_kernel(backend: &Backend) -> Result<MatmulCaseResult, Backe
 
     // product = left @ right, computed by cuBLAS on the kernel's output
     let left = left.reshape(&[size, size]).map_err(cutile_error)?;
-    let right = backend.upload_matrix(&right_host, [size, size])?;
-    let mut product = backend.zeros_matrix([size, size])?;
+    let right = backend.upload(&right_host, &[size, size])?;
+    let mut product = backend.zeros(&[size, size])?;
     backend.matmul(&mut product, &left, &right)?;
 
     // doubled = product + product, computed by the kernel on cuBLAS's output
@@ -502,25 +464,6 @@ fn cycling(period: u8, elements: usize) -> Vec<f32> {
     (0..period).cycle().map(f32::from).take(elements).collect()
 }
 
-fn launch_rms_norm_f32(
-    stream: &Arc<Stream>,
-    output: &mut Tensor<f32>,
-    input: &Tensor<f32>,
-    weight: &Tensor<f32>,
-    params: &RmsNormParams,
-) -> Result<(), BackendError> {
-    let _ = rms_norm_f32(
-        output.partition([1, params.tile_hidden_size]),
-        input,
-        weight,
-        params.inverse_hidden_size,
-        params.epsilon,
-    )
-    .sync_on(stream)
-    .map_err(cutile_error)?;
-    Ok(())
-}
-
 fn launch_rms_norm_bf16(
     stream: &Arc<Stream>,
     output: &mut Tensor<bf16>,
@@ -541,22 +484,21 @@ fn launch_rms_norm_bf16(
 }
 
 fn benchmark_rms_norm_f32(
-    stream: &Arc<Stream>,
+    backend: &Backend,
     output: &mut Tensor<f32>,
     input: &Tensor<f32>,
     weight: &Tensor<f32>,
-    params: &RmsNormParams,
+    epsilon: f32,
 ) -> Result<KernelBenchmark, BackendError> {
     for _ in 0..BENCHMARK_WARMUP_ITERATIONS {
-        launch_rms_norm_f32(stream, output, input, weight, params)?;
+        backend.rms_norm(output, input, weight, epsilon)?;
     }
-    let timings = measure(stream, BENCHMARK_ITERATIONS, || {
-        launch_rms_norm_f32(stream, output, input, weight, params)
+    let timings = measure(&backend.stream, BENCHMARK_ITERATIONS, || {
+        backend.rms_norm(output, input, weight, epsilon)
     })?;
-    Ok(summarize(
-        timings,
-        logical_bytes(params.rows, params.hidden_size, 4),
-    ))
+
+    let [rows, hidden_size] = dims("rms_norm", "input", input.shape())?;
+    Ok(summarize(timings, logical_bytes(rows, hidden_size, 4)))
 }
 
 fn benchmark_rms_norm_bf16(
@@ -625,12 +567,6 @@ fn percentile(sorted: &[f64], percentile: usize) -> f64 {
 fn logical_bytes(rows: usize, hidden_size: usize, element_bytes: usize) -> usize {
     // Each row reads its input and weight once, then writes one output row.
     rows * hidden_size * element_bytes * 3
-}
-
-fn inverse_hidden_size(hidden_size: usize) -> f32 {
-    let hidden_size =
-        u16::try_from(hidden_size).expect("validated RMSNorm hidden size fits in u16");
-    f32::from(hidden_size).recip()
 }
 
 fn verify(

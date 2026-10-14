@@ -124,12 +124,14 @@ Every case here is about ten thousand elements or fewer, so the timings mostly
 measure launch overhead. Nsight Compute runs on Modal. Nsight Systems captures a trace but fails
 to import it into a report, and the result file records that failure.
 
-## Rust projection check
+## Rust layer 0 check
 
-The first check against the real model loads the pinned Qwen3 weights in Rust,
-widens them from bfloat16 to float32, and runs layer 0's query, key and value
-projections on the GPU through cuBLAS. Each result is compared with the golden
-fixtures, for the five prefill rows and for the single decode row.
+This check runs the real model. It loads the pinned Qwen3 weights in Rust,
+widens them from bfloat16 to float32, and runs layer 0's attention on the GPU
+for the five-token fixture prompt. Every stage is compared with the golden
+fixtures: the query, key and value projections, the rotated queries and keys,
+the attention scores, the attention probabilities and the attention output.
+The single decode row is checked up to its projections.
 
 ```bash
 make rust-verify
@@ -137,8 +139,9 @@ make rust-verify
 
 The job reads the weights from the shared Modal Volume and downloads the pinned
 snapshot if it is not there yet. It runs the artifact inspection first, then
-prints the largest error for each projection. The allowed error is
-`atol + rtol * |expected|`, with both values recorded in the fixture manifest.
+prints the largest error at each stage. The allowed error is
+`atol + rtol * |expected|`, with one pair per stage recorded in the fixture
+manifest.
 
 ## Cost and cache
 See [Modal pricing](https://modal.com/pricing).

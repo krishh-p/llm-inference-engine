@@ -42,7 +42,6 @@ def smoke_test() -> dict[str, object]:
     cuda_version = str(torch.version.cuda)
     torch_version = str(torch.__version__)
 
-    # start tracking peak GPU memory before loading the model
     torch.cuda.reset_peak_memory_stats()
 
     load_started = time.perf_counter()
@@ -59,7 +58,7 @@ def smoke_test() -> dict[str, object]:
     )
     model.eval()
 
-    # loading the model onto the GPU can still be in progress. wait for that to finish then stop the timer
+    # gpu work is queued, so wait for it to finish before reading the clock
     torch.cuda.synchronize()
     model_load_seconds = time.perf_counter() - load_started
 
@@ -74,7 +73,6 @@ def smoke_test() -> dict[str, object]:
 
     prompt_tokens = int(inputs["input_ids"].shape[1])
 
-    # the prompt may still be copying to the GPU, wait for that copy to finish then start the timer
     torch.cuda.synchronize()
     generation_started = time.perf_counter()
 
@@ -86,7 +84,6 @@ def smoke_test() -> dict[str, object]:
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    # generating tokens can still be in progress. wait for that to finish then stop the timer
     torch.cuda.synchronize()
     generation_seconds = time.perf_counter() - generation_started
 

@@ -1,9 +1,8 @@
 //! Private bindings for the cuBLAS calls the backend uses.
 //!
-//! The pinned CUDA crates do not cover cuBLAS, so the four functions are
-//! declared here and wrapped so the rest of the backend never calls them.
+//! The pinned CUDA crates do not cover cuBLAS, so its functions are declared
+//! here and wrapped. This is the only module that calls them.
 
-// Every cuBLAS call is foreign, so this module is where the unsafe code lives.
 #![allow(unsafe_code)]
 
 use std::ffi::{c_int, c_void};
@@ -79,7 +78,7 @@ impl CublasHandle {
         Ok(handle)
     }
 
-    /// Queues one float32 GEMM on the handle's stream: `C = op(A) @ B`.
+    /// Queues one float32 GEMM on the handle's stream: `C = alpha * op(A) @ B`.
     ///
     /// # Safety
     ///
@@ -89,6 +88,7 @@ impl CublasHandle {
     pub(crate) unsafe fn gemm_f32(
         &self,
         call: &GemmCall,
+        alpha: f32,
         a: usize,
         b: usize,
         c: usize,
@@ -100,7 +100,6 @@ impl CublasHandle {
         } else {
             CUBLAS_OP_N
         };
-        let alpha = 1.0_f32;
         let beta = 0.0_f32;
 
         // SAFETY: the handle is open, cuBLAS copies alpha and beta during the
