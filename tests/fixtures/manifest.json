@@ -27,6 +27,7 @@
     374
   ],
   "max_logit_diff_vs_hugging_face": 2.288818359375e-05,
+  "max_decode_logit_diff_vs_hugging_face": 2.47955322265625e-05,
   "max_logit_diff_tolerance": 0.001,
   "files": {
     "rms_norm.safetensors": {
@@ -481,6 +482,13 @@
     },
     "generation.safetensors": {
       "tensors": {
+        "layer_outputs": {
+          "shape": [
+            28,
+            2048
+          ],
+          "dtype": "float32"
+        },
         "final_norm": {
           "shape": [
             2048
@@ -492,10 +500,22 @@
             151936
           ],
           "dtype": "float32"
+        },
+        "decode_logits": {
+          "shape": [
+            151936
+          ],
+          "dtype": "float32"
         }
       },
-      "bytes": 616096,
-      "sha256": "ebdd78e475a1d025c9e1442cf629bc3f0af79ff3c5209f7b782b0e1b7b7eb19a"
+      "tolerances": {
+        "layer_output_atol": 0.0001,
+        "layer_output_rtol": 0.0001,
+        "logits_atol": 0.001,
+        "logits_rtol": 0.0001
+      },
+      "bytes": 1453384,
+      "sha256": "3bc81fe9aa7887357d1433a4db53e9695738f4fdd2b619636ade3149f6291a9c"
     }
   }
 }

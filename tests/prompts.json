@@ -3,23 +3,28 @@
   "cases": [
     {
       "prompt": "The capital of France is",
-      "token_ids": [785, 6722, 315, 9625, 374]
+      "token_ids": [785, 6722, 315, 9625, 374],
+      "expected_token_ids": [12095, 13, 12095, 374, 279, 6722, 315, 9625]
     },
     {
       "prompt": "2 + 2 =",
-      "token_ids": [17, 488, 220, 17, 284]
+      "token_ids": [17, 488, 220, 17, 284],
+      "expected_token_ids": [220, 16, 15, 1124, 8, 320, 1921, 264]
     },
     {
       "prompt": "Once upon a time",
-      "token_ids": [12522, 5193, 264, 882]
+      "token_ids": [12522, 5193, 264, 882],
+      "expected_token_ids": [11, 1052, 572, 264, 2632, 3743, 879, 10245]
     },
     {
       "prompt": "def fibonacci(n):",
-      "token_ids": [750, 75698, 1445, 1648]
+      "token_ids": [750, 75698, 1445, 1648],
+      "expected_token_ids": [198, 262, 421, 308, 621, 220, 15, 510]
     },
     {
       "prompt": "The opposite of hot is",
-      "token_ids": [785, 14002, 315, 4017, 374]
+      "token_ids": [785, 14002, 315, 4017, 374],
+      "expected_token_ids": [9255, 13, 576, 14002, 315, 9255, 374, 4017]
     }
   ]
 }

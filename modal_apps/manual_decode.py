@@ -174,6 +174,7 @@ def compare_prompt(model, tokenizer, prompt, max_new_tokens):
 
     return {
         "prompt": prompt,
+        "ids": manual["ids"],
         "hf_completion": tokenizer.decode(expected["ids"], skip_special_tokens=True),
         "manual_completion": tokenizer.decode(manual["ids"], skip_special_tokens=True),
         "prefill_max_logit_diff": max_logit_diff,
@@ -227,7 +228,13 @@ def regression_suite(
                 f"prompt {prompt!r} tokenized to {token_ids}, "
                 f"expected {case['token_ids']}"
             )
-        results.append(compare_prompt(model, tokenizer, prompt, max_new_tokens))
+        result = compare_prompt(model, tokenizer, prompt, max_new_tokens)
+        if result["ids"] != case["expected_token_ids"]:
+            raise RuntimeError(
+                f"prompt {prompt!r} generated {result['ids']}, "
+                f"expected {case['expected_token_ids']}"
+            )
+        results.append(result)
     return results
 
 
@@ -314,7 +321,8 @@ def run_regression() -> None:
     print(f"regression prompts passed: {len(results)}")
     for result in results:
         print(
-            f"{result['prompt']!r}: max_logit_diff={result['prefill_max_logit_diff']}"
+            f"{result['prompt']!r}: ids={result['ids']}, "
+            f"max_logit_diff={result['prefill_max_logit_diff']}"
         )
 
 

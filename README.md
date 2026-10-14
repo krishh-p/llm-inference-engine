@@ -38,6 +38,10 @@ Run the fixed five-prompt regression set:
 make regression
 ```
 
+Each prompt in `tests/prompts.json` records the greedy token IDs it should
+generate, and the run fails if the reference or Hugging Face produces anything
+else.
+
 Compare cached decode with recomputing the full sequence for every token:
 
 ```bash
@@ -51,7 +55,9 @@ enough to show clearly on the GPU.
 
 The Rust tests will use small SafeTensors fixtures generated from the float32
 Python reference. They cover RMSNorm, RoPE at both small and large positions,
-layer 0 during prefill and decode, and the first greedy tokens.
+layer 0 during prefill and decode, and the whole model: the last prompt token
+after every layer, the prefill logits, the logits of the first decode step and
+the first greedy tokens.
 
 ```bash
 make fixtures

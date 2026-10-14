@@ -28,6 +28,11 @@ BLOCK_TOLERANCES = {
     "mlp_output": (1e-5, 1e-5),
     "block_output": (1e-5, 1e-5),
 }
+# errors build up over 28 layers, so the whole-model checks are looser
+GENERATION_TOLERANCES = {
+    "layer_output": (1e-4, 1e-4),
+    "logits": (1e-3, 1e-4),
+}
 
 SOURCE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = modal_common.find_project_root(__file__)
@@ -69,6 +74,14 @@ def make_fixture(tensors):
     }
 
 
+def stage_tolerances(stages):
+    tolerances = {}
+    for stage, (atol, rtol) in stages.items():
+        tolerances[f"{stage}_atol"] = atol
+        tolerances[f"{stage}_rtol"] = rtol
+    return tolerances
+
+
 @app.function(
     image=image,
     gpu=modal_common.GPU_TYPE,
@@ -95,6 +108,7 @@ def build_fixtures() -> dict[str, object]:
     weights = model.state_dict()
 
     eos_ids = modal_common.eos_token_ids(model, tokenizer)
+    all_layers = range(model.config.num_hidden_layers)
 
     trace = {}
     decode_trace = {}
@@ -106,7 +120,7 @@ def build_fixtures() -> dict[str, object]:
             weights,
             model.config,
             trace=trace,
-            trace_layers=(0,),
+            trace_layers=all_layers,
         )
 
         while len(expected_ids) < MAX_NEW_TOKENS:
@@ -124,6 +138,9 @@ def build_fixtures() -> dict[str, object]:
             )
 
         hf_prefill_logits = model(**inputs).logits[0, -1, :]
+        # the first decode step sees the prompt plus the first generated token
+        decode_ids = torch.cat([prompt_ids, prompt_ids.new_tensor(expected_ids[:1])])
+        hf_decode_logits = model(decode_ids[None]).logits[0, -1, :]
         hf_output = model.generate(
             **inputs,
             max_new_tokens=MAX_NEW_TOKENS,
@@ -144,6 +161,12 @@ def build_fixtures() -> dict[str, object]:
     )
     if max_logit_diff > qwen3.MAX_LOGIT_DIFF:
         raise RuntimeError(f"prefill logits differ by {max_logit_diff}")
+
+    max_decode_logit_diff = (
+        (decode_trace["logits"].float() - hf_decode_logits.float()).abs().max().item()
+    )
+    if max_decode_logit_diff > qwen3.MAX_LOGIT_DIFF:
+        raise RuntimeError(f"decode logits differ by {max_decode_logit_diff}")
 
     layer = "layer.0."
     layer_weights = "model.layers.0."
@@ -264,8 +287,13 @@ def build_fixtures() -> dict[str, object]:
             "output": decode_trace[layer + "output"],
         },
         "generation.safetensors": {
+            # the last prompt token after each layer, [28, 2048]
+            "layer_outputs": torch.stack(
+                [trace[f"layer.{i}.output"][-1] for i in all_layers]
+            ),
             "final_norm": trace["final_norm"],
             "prefill_logits": trace["logits"],
+            "decode_logits": decode_trace["logits"],
         },
     }
 
@@ -285,11 +313,10 @@ def build_fixtures() -> dict[str, object]:
         "bfloat16_atol": RMS_NORM_BFLOAT16_ATOL,
     }
     for filename in ("block_0.safetensors", "decode_block_0.safetensors"):
-        tolerances = {}
-        for stage, (atol, rtol) in BLOCK_TOLERANCES.items():
-            tolerances[f"{stage}_atol"] = atol
-            tolerances[f"{stage}_rtol"] = rtol
-        file_info[filename]["tolerances"] = tolerances
+        file_info[filename]["tolerances"] = stage_tolerances(BLOCK_TOLERANCES)
+    file_info["generation.safetensors"]["tolerances"] = stage_tolerances(
+        GENERATION_TOLERANCES
+    )
 
     manifest = {
         "format_version": 1,
@@ -303,6 +330,7 @@ def build_fixtures() -> dict[str, object]:
         "positions": trace["positions"].tolist(),
         "expected_greedy_token_ids": expected_ids,
         "max_logit_diff_vs_hugging_face": max_logit_diff,
+        "max_decode_logit_diff_vs_hugging_face": max_decode_logit_diff,
         "max_logit_diff_tolerance": qwen3.MAX_LOGIT_DIFF,
         "files": file_info,
     }
