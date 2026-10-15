@@ -310,12 +310,63 @@ def generate_on_gpu(prompt: str, max_new_tokens: int) -> dict[str, object]:
             f"stderr:\n{completed.stderr}"
         )
 
+    result = environment()
+    result.update(json.loads(metrics_path.read_text(encoding="utf-8")))
+    result["stdout"] = completed.stdout.strip()
+    return result
+
+
+@app.function(
+    image=image,
+    gpu="L4",
+    volumes={modal_common.HF_CACHE_PATH: hf_cache},
+    timeout=1200,
+)
+def bench_on_gpu(
+    context_lengths: str, warmup_steps: int, measured_steps: int
+) -> dict[str, object]:
+    model_dir = download_model()
+    output_path = Path("/tmp/rust-bench.json")
+
+    completed = subprocess.run(
+        [
+            f"{REMOTE_ROOT}/target/release/qwen3-cli",
+            "bench",
+            "--model-dir",
+            model_dir,
+            "--context-lengths",
+            context_lengths,
+            "--warmup-steps",
+            str(warmup_steps),
+            "--measured-steps",
+            str(measured_steps),
+            "--output",
+            str(output_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "qwen3-cli bench failed\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+
+    result = environment()
+    result.update(json.loads(output_path.read_text(encoding="utf-8")))
+    result["stdout"] = completed.stdout.strip()
+    return result
+
+
+def environment() -> dict[str, str]:
     gpu_name, driver, compute_capability = run_command(
         "nvidia-smi",
         "--query-gpu=name,driver_version,compute_cap",
         "--format=csv,noheader",
     ).split(", ")
-    result = {
+    return {
         "model": modal_common.MODEL_NAME,
         "model_revision": model_revision(),
         "gpu": gpu_name,
@@ -324,9 +375,6 @@ def generate_on_gpu(prompt: str, max_new_tokens: int) -> dict[str, object]:
         "cuda": run_command("nvcc", "--version").splitlines()[-1],
         "rustc": run_command("rustc", "--version"),
     }
-    result.update(json.loads(metrics_path.read_text(encoding="utf-8")))
-    result["stdout"] = completed.stdout.strip()
-    return result
 
 
 def model_revision() -> str:
@@ -504,7 +552,21 @@ def run_verify() -> None:
 def run_generate(prompt: str, max_new_tokens: int) -> None:
     result = generate_on_gpu.remote(prompt, max_new_tokens)
     print(result.pop("stdout"))
+    save_result(result, "rust-generate")
 
+
+@app.local_entrypoint()
+def run_bench(
+    context_lengths: str = "128,512,2048",
+    warmup_steps: int = 16,
+    measured_steps: int = 32,
+) -> None:
+    result = bench_on_gpu.remote(context_lengths, warmup_steps, measured_steps)
+    print(result.pop("stdout"))
+    save_result(result, "rust-bench")
+
+
+def save_result(result: dict[str, object], name: str) -> None:
     commit, dirty = git_metadata()
     completed_at = datetime.now(UTC)
     result["git_commit"] = commit
@@ -513,8 +575,6 @@ def run_generate(prompt: str, max_new_tokens: int) -> None:
 
     results_dir = PROJECT_ROOT / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-    output_path = results_dir / completed_at.strftime(
-        "rust-generate-%Y%m%dT%H%M%SZ.json"
-    )
+    output_path = results_dir / completed_at.strftime(f"{name}-%Y%m%dT%H%M%SZ.json")
     output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(f"result_json: {output_path}")

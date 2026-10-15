@@ -1,4 +1,4 @@
-use model_qwen3::Completion;
+use model_qwen3::{Completion, DecodeBench};
 use serde_json::{Value, json};
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -37,6 +37,40 @@ pub(crate) fn run_json(prompt: &str, completion: &Completion, seed: u64, dtype: 
         "tokens_per_second": per_second(generated_tokens, metrics.generation_seconds),
         "gpu_memory_used_gib": gib(metrics.peak_memory_used_bytes),
         "gpu_memory_total_gib": gib(metrics.memory_total_bytes),
+    })
+}
+
+/// One decode benchmark run as a JSON object, with a summary per context length.
+pub(crate) fn bench_json(bench: &DecodeBench, dtype: &str) -> Value {
+    let contexts = bench
+        .contexts
+        .iter()
+        .map(|context| {
+            let steps = &context.decode_step_seconds;
+            json!({
+                "context_tokens": context.context_tokens,
+                "prefill_seconds": context.prefill_seconds,
+                "prompt_tokens_per_second": per_second(context.context_tokens, context.prefill_seconds),
+                "measured_steps": steps.len(),
+                "decode_step_min_ms": percentile(steps, 0).map(milliseconds),
+                "decode_step_median_ms": percentile(steps, 50).map(milliseconds),
+                "decode_step_p95_ms": percentile(steps, 95).map(milliseconds),
+                "decode_step_max_ms": percentile(steps, 100).map(milliseconds),
+                "decode_tokens_per_second": per_second(steps.len(), steps.iter().sum()),
+                "decode_allocations": context.decode_allocations,
+                "decode_step_ms": steps.iter().copied().map(milliseconds).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "engine": "rust",
+        "dtype": dtype,
+        "warmup_steps": bench.warmup_steps,
+        "model_load_seconds": bench.model_load_seconds,
+        "gpu_memory_used_gib": gib(bench.peak_memory_used_bytes),
+        "gpu_memory_total_gib": gib(bench.memory_total_bytes),
+        "contexts": contexts,
     })
 }
 

@@ -1,4 +1,4 @@
-.PHONY: dev manual fixtures regression cache-benchmark rust-check rust-inspect rust-smoke rust-verify rust-generate
+.PHONY: dev manual fixtures regression cache-benchmark rust-check rust-inspect rust-smoke rust-verify rust-generate rust-bench
 
 PROMPT ?= The capital of France is
 MAX_NEW_TOKENS ?= 20
@@ -36,3 +36,6 @@ rust-verify:
 
 rust-generate:
 	uv run modal run modal_apps/rust_smoke.py::run_generate --prompt "$(PROMPT)" --max-new-tokens $(MAX_NEW_TOKENS)
+
+rust-bench:
+	uv run modal run modal_apps/rust_smoke.py::run_bench

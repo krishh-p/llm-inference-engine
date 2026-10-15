@@ -64,6 +64,9 @@ pub enum ModelError {
     #[error("max_new_tokens must be at least 1")]
     NoNewTokens,
 
+    #[error("the benchmark needs at least one measured step")]
+    NoMeasuredSteps,
+
     #[error(
         "{prompt_tokens} prompt tokens plus {max_new_tokens} new tokens do not fit in {max_positions} positions"
     )]

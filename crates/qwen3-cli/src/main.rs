@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use engine_core::FixtureManifest;
 use model_qwen3::{
-    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, complete, verify_generation,
-    verify_layer_0, verify_model,
+    BoundaryResult, ModelError, Qwen3Artifacts, RegressionPromptSet, bench_decode, complete,
+    verify_generation, verify_layer_0, verify_model,
 };
 use thiserror::Error;
 
@@ -93,6 +93,33 @@ enum Command {
         #[arg(long)]
         metrics_json: Option<PathBuf>,
     },
+
+    /// Time steady-state decode steps with different numbers of tokens in the cache.
+    Bench {
+        /// Directory containing config.json, tokenizer.json and `SafeTensors` weights.
+        #[arg(long)]
+        model_dir: PathBuf,
+
+        /// Text whose tokens are repeated to fill the cache to each length.
+        #[arg(long, default_value = "The capital of France is")]
+        prompt: String,
+
+        /// Tokens to put in the cache before decoding, one benchmark per length.
+        #[arg(long, value_delimiter = ',', default_values_t = [128, 512, 2048])]
+        context_lengths: Vec<usize>,
+
+        /// Untimed decode steps first. 16 covers every softmax recompile.
+        #[arg(long, default_value_t = 16)]
+        warmup_steps: usize,
+
+        /// Timed decode steps at each length.
+        #[arg(long, default_value_t = 32)]
+        measured_steps: usize,
+
+        /// Write the results to this JSON file.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 /// The precisions the engine can run in. Weights are stored in bfloat16 and
@@ -176,6 +203,21 @@ fn run(cli: Cli) -> Result<(), CliError> {
             dtype,
             warmup_runs,
             metrics_json.as_deref(),
+        ),
+        Command::Bench {
+            model_dir,
+            prompt,
+            context_lengths,
+            warmup_steps,
+            measured_steps,
+            output,
+        } => bench(
+            &model_dir,
+            &prompt,
+            &context_lengths,
+            warmup_steps,
+            measured_steps,
+            output.as_deref(),
         ),
     }
 }
@@ -302,13 +344,56 @@ fn generate(
     }
 
     if let Some(path) = metrics_path {
-        let text = serde_json::to_string_pretty(&run).expect("a JSON value always serializes");
-        std::fs::write(path, text + "\n").map_err(|source| CliError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        write_json(path, &run)?;
     }
     Ok(())
+}
+
+fn bench(
+    model_dir: &Path,
+    prompt: &str,
+    context_lengths: &[usize],
+    warmup_steps: usize,
+    measured_steps: usize,
+    output: Option<&Path>,
+) -> Result<(), CliError> {
+    let artifacts = Qwen3Artifacts::open(model_dir)?;
+    let prompt_ids = artifacts.tokenizer.encode(prompt)?;
+    let result = bench_decode(
+        &artifacts,
+        &prompt_ids,
+        context_lengths,
+        warmup_steps,
+        measured_steps,
+    )?;
+    let run = metrics::bench_json(&result, Dtype::Float32.name());
+
+    println!("model_load_seconds: {}", run["model_load_seconds"]);
+    println!("gpu_memory_used_gib: {}", run["gpu_memory_used_gib"]);
+    for context in run["contexts"].as_array().into_iter().flatten() {
+        println!(
+            "context_tokens={}: decode_step_median_ms={}, decode_step_p95_ms={}, decode_tokens_per_second={}, prefill_seconds={}, decode_allocations={}",
+            context["context_tokens"],
+            context["decode_step_median_ms"],
+            context["decode_step_p95_ms"],
+            context["decode_tokens_per_second"],
+            context["prefill_seconds"],
+            context["decode_allocations"],
+        );
+    }
+
+    if let Some(path) = output {
+        write_json(path, &run)?;
+    }
+    Ok(())
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), CliError> {
+    let text = serde_json::to_string_pretty(value).expect("a JSON value always serializes");
+    std::fs::write(path, text + "\n").map_err(|source| CliError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn print_results(results: &[BoundaryResult]) {

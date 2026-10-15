@@ -169,6 +169,25 @@ load, prefill, first-token, decode and memory numbers. It also records the GPU,
 CUDA, Rust version, model revision and git commit so a run can be traced back to
 the code that produced it.
 
+## Rust decode benchmark
+
+```bash
+make rust-bench
+```
+
+This times steady-state decode steps with 128, 512 and 2048 tokens already in
+the cache, filled by repeating a short prompt. For each length, a prefill and
+16 decode steps first run on a cache that is then thrown away, so every kernel
+is compiled. A fresh cache is then filled and 32 steps are timed, starting from
+exactly that many tokens. It writes `results/rust-bench-*.json` with the min,
+median, p95 and max step, decode tokens per second, prefill time, and every
+step's time, plus the same environment and git details as above.
+
+The warmup is 16 steps because cuTile compiles a kernel again whenever an
+integer argument's largest power-of-two divisor changes, up to 16. The softmax
+takes the token's position, so the first steps after a prefill each hit one of
+those compiles. Any 16 positions in a row cover every version.
+
 ## Cost and cache
 
 The first run downloads the model into the shared

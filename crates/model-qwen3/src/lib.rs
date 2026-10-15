@@ -1,4 +1,5 @@
 mod artifacts;
+mod bench;
 mod config;
 mod error;
 mod generate;
@@ -22,6 +23,7 @@ mod trace;
 mod workspace;
 
 pub use artifacts::{ModelSummary, Qwen3Artifacts};
+pub use bench::{ContextBench, DecodeBench, bench_decode};
 pub use config::Qwen3Config;
 pub use error::{ModelError, Result};
 pub use generate::{Completion, Metrics, complete};
