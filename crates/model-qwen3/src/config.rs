@@ -30,11 +30,6 @@ pub struct Qwen3Config {
 
 impl Qwen3Config {
     /// Loads and validates a Qwen3 `config.json` file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file cannot be read or parsed, or when the
-    /// configuration is incompatible with this implementation.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let config: Self = engine_core::read_json(path)?;
         config.validate()?;
@@ -42,11 +37,6 @@ impl Qwen3Config {
     }
 
     /// Checks the model assumptions needed by the Qwen3 implementation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the architecture or tensor dimensions are not a
-    /// supported Qwen3 configuration.
     pub fn validate(&self) -> Result<()> {
         if self.model_type != "qwen3" {
             return Err(ModelError::InvalidConfig(format!(
@@ -103,10 +93,6 @@ impl Qwen3Config {
     }
 
     /// Checks that every token ID has a row in the embedding table.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error naming the first ID that is past the vocabulary.
     pub fn check_token_ids(&self, token_ids: &[u32]) -> Result<()> {
         for &token_id in token_ids {
             if !usize::try_from(token_id).is_ok_and(|id| id < self.vocab_size) {
@@ -120,10 +106,6 @@ impl Qwen3Config {
     }
 
     /// Checks that a forward pass was given one cache for every layer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for any other number of caches.
     pub fn check_cache_count(&self, caches: usize) -> Result<()> {
         if caches != self.num_hidden_layers {
             return Err(ModelError::CacheCount {

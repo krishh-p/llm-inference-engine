@@ -20,11 +20,6 @@ pub struct RegressionCase {
 
 impl RegressionPromptSet {
     /// Loads the fixed tokenizer regression cases.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file cannot be read or parsed, or when it has
-    /// no test cases.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let set: Self = engine_core::read_json(path)?;
         if set.cases.is_empty() {
@@ -36,11 +31,6 @@ impl RegressionPromptSet {
     }
 
     /// Confirms that every prompt produces its recorded token IDs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when tokenization fails or any result differs from the
-    /// recorded IDs.
     pub fn validate_tokenizer(&self, tokenizer: &Qwen3Tokenizer) -> Result<()> {
         for case in &self.cases {
             let actual = tokenizer.encode(&case.prompt)?;

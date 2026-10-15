@@ -31,11 +31,6 @@ pub struct ModelSummary {
 
 impl Qwen3Artifacts {
     /// Opens and validates a local Qwen3 model snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a required artifact is missing or invalid, or
-    /// when the weight tensors do not match the model configuration.
     pub fn open(directory: impl AsRef<Path>) -> Result<Self> {
         let directory = directory.as_ref();
         let config_path = directory.join("config.json");
@@ -89,11 +84,6 @@ impl Qwen3Artifacts {
     }
 
     /// Checks that every required weight has the configured shape and dtype.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a missing tensor, a shape mismatch, an unsupported
-    /// model dtype, or a tensor whose dtype does not match the configuration.
     pub fn validate_weights(&self) -> Result<()> {
         let config = &self.config;
         let dtype = model_dtype(&config.torch_dtype)?;

@@ -18,6 +18,10 @@ use crate::{BackendError, check_rms_norm_shape};
 ///
 /// Each method waits for its work to finish before it returns, so a result can
 /// be read, and an input dropped, as soon as the call is over.
+///
+/// Every operation checks its tensors' shapes, and that they are contiguous
+/// and on this device, before it queues any work. It returns an error when a
+/// check fails or CUDA, cuTile or cuBLAS reports one.
 pub struct Backend {
     pub(crate) device: Arc<Device>,
     pub(crate) stream: Arc<Stream>,
@@ -29,11 +33,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// Opens the first CUDA device.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the device, its stream or cuBLAS cannot be opened.
+    /// Opens CUDA device 0 with one stream and one cuBLAS handle.
     pub fn new() -> Result<Self, BackendError> {
         let device = Device::new(0).map_err(cuda_error)?;
         let stream = device.new_stream().map_err(cuda_error)?;
@@ -50,20 +50,13 @@ impl Backend {
     }
 
     /// How many buffers [`Backend::upload`], [`Backend::zeros`] and
-    /// [`Backend::download`] have allocated so far. Comparing two counts shows
-    /// whether the work in between allocated anything.
+    /// [`Backend::download`] have allocated so far.
     pub fn allocations(&self) -> usize {
         self.allocations.load(Ordering::Relaxed)
     }
 
-    /// Device memory in use and in total, in bytes, as the driver reports it.
-    ///
-    /// This counts everything on the device, including memory that CUDA,
-    /// cuBLAS and other processes hold, not just this backend's tensors.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the driver cannot be asked.
+    /// Device memory in use and in total, in bytes. This is device-wide, so it
+    /// includes what CUDA, cuBLAS and other processes hold.
     #[allow(unsafe_code)]
     pub fn memory_in_use(&self) -> Result<(usize, usize), BackendError> {
         self.device.bind_to_thread().map_err(cuda_error)?;
@@ -77,10 +70,6 @@ impl Backend {
     }
 
     /// Copies row-major float32 values to the device.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `values` does not fill `shape` or the copy fails.
     pub fn upload(&self, values: &[f32], shape: &[usize]) -> Result<Tensor<f32>, BackendError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         api::copy_host_vec_to_device(&Arc::new(values.to_vec()))
@@ -91,10 +80,6 @@ impl Backend {
     }
 
     /// Allocates a float32 tensor of zeros on the device.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the allocation fails.
     pub fn zeros(&self, shape: &[usize]) -> Result<Tensor<f32>, BackendError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         api::zeros::<f32>(shape)
@@ -103,26 +88,17 @@ impl Backend {
     }
 
     /// Copies a tensor back to host memory in row-major order.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the copy fails.
     pub fn download(&self, tensor: &Tensor<f32>) -> Result<Vec<f32>, BackendError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        // cuTile's host copy takes ownership, so it is given a device copy.
+        // cuTile's host copy takes ownership, so it is given a device copy
         let copy = tensor.dup().sync_on(&self.stream).map_err(cutile_error)?;
         copy.to_host_vec()
             .sync_on(&self.stream)
             .map_err(cutile_error)
     }
 
-    /// Copies a tensor into an existing host buffer, in row-major order,
-    /// without allocating anything.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tensor is on another device or is not
-    /// contiguous, `host` has a different length, or the copy fails.
+    /// Like [`Backend::download`], but into an existing buffer, so nothing is
+    /// allocated.
     #[allow(unsafe_code)]
     pub fn download_into(
         &self,
@@ -157,12 +133,6 @@ impl Backend {
 
     /// Copies `rows` rows of one matrix into another of the same width, so
     /// `output[output_row + i] = input[input_row + i]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device or is not
-    /// contiguous, the widths differ, either range runs past its matrix, or
-    /// the copy fails.
     #[allow(unsafe_code)]
     pub fn copy_rows(
         &self,
@@ -197,11 +167,6 @@ impl Backend {
     }
 
     /// Computes `output = left @ right` for row-major matrices.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a matrix is on another device or is not
-    /// contiguous, the shapes do not agree, or cuBLAS fails.
     pub fn matmul(
         &self,
         output: &mut Tensor<f32>,
@@ -212,11 +177,6 @@ impl Backend {
     }
 
     /// Computes `output = left @ right^T` for row-major matrices.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a matrix is on another device or is not
-    /// contiguous, the shapes do not agree, or cuBLAS fails.
     pub fn matmul_transposed(
         &self,
         output: &mut Tensor<f32>,
@@ -234,11 +194,6 @@ impl Backend {
     /// shared by `group` consecutive query heads, which is how grouped-query
     /// attention pairs them. `scores` is `[heads, rows, capacity]`, and only
     /// its first `keys` columns are written.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device or is not
-    /// contiguous, the shapes do not agree, or cuBLAS fails.
     pub fn attention_scores(
         &self,
         scores: &mut Tensor<f32>,
@@ -258,11 +213,6 @@ impl Backend {
     /// `probs` is `[heads, rows, capacity]`, `v` is a value cache
     /// `[kv_heads, capacity, head_dim]` holding `keys` tokens, and `output` is
     /// `[heads, rows, head_dim]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device or is not
-    /// contiguous, the shapes do not agree, or cuBLAS fails.
     pub fn attention_mix(
         &self,
         output: &mut Tensor<f32>,
@@ -276,11 +226,6 @@ impl Backend {
     }
 
     /// Computes `output = left + right` for matrices of the same shape.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, the shapes do not
-    /// agree, or the kernel fails.
     pub fn add(
         &self,
         output: &mut Tensor<f32>,
@@ -300,11 +245,6 @@ impl Backend {
     }
 
     /// Computes `output = silu(gate) * up` for matrices of the same shape.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, the shapes do not
-    /// agree, or the kernel fails.
     pub fn silu_mul(
         &self,
         output: &mut Tensor<f32>,
@@ -323,11 +263,6 @@ impl Backend {
     }
 
     /// Normalizes each row of a `[rows, hidden_size]` matrix and scales it by `weight`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, a shape is wrong
-    /// or unsupported, or the kernel fails.
     pub fn rms_norm(
         &self,
         output: &mut Tensor<f32>,
@@ -341,8 +276,8 @@ impl Backend {
         expect_shape("rms_norm", "weight", weight.shape(), &[hidden_size])?;
         self.check_tensors(&[("input", input), ("weight", weight), ("output", &*output)])?;
 
-        // The tile width is rounded up to a power of two. The padding adds
-        // nothing to the sum, and the mean still divides by the real width.
+        // the tile width is rounded up to a power of two. the padding adds
+        // nothing to the sum, and the mean still divides by the real width
         let _ = rms_norm_f32(
             output.partition([1, hidden_size.next_power_of_two()]),
             input,
@@ -357,11 +292,6 @@ impl Backend {
 
     /// Normalizes every head's vector in a `[heads, rows, head_dim]` tensor
     /// and scales it by `weight`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, a shape is wrong
-    /// or unsupported, or the kernel fails.
     pub fn rms_norm_heads(
         &self,
         output: &mut Tensor<f32>,
@@ -396,11 +326,6 @@ impl Backend {
     ///
     /// This gives the same results as [`Backend::add`] followed by
     /// [`Backend::rms_norm`], without reading the sum back from memory.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, a shape is wrong
-    /// or unsupported, or the kernel fails.
     pub fn add_rms_norm(
         &self,
         sum: &mut Tensor<f32>,
@@ -448,11 +373,6 @@ impl Backend {
     ///
     /// `cos` and `sin` are `[rows, head_dim / 2]` tables with one row for the
     /// position of each token.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, the shapes do not
-    /// agree, or the kernel fails.
     pub fn rope(
         &self,
         output: &mut Tensor<f32>,
@@ -481,11 +401,6 @@ impl Backend {
 
     /// Splits `[rows, heads * head_dim]` into `[heads, rows, head_dim]`, so
     /// each head's vectors sit together.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, the shapes do not
-    /// agree, or the kernel fails.
     pub fn split_heads(
         &self,
         output: &mut Tensor<f32>,
@@ -507,11 +422,6 @@ impl Backend {
     }
 
     /// Merges `[heads, rows, head_dim]` back into `[rows, heads * head_dim]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, the shapes do not
-    /// agree, or the kernel fails.
     pub fn merge_heads(
         &self,
         output: &mut Tensor<f32>,
@@ -538,12 +448,6 @@ impl Backend {
     ///
     /// This adds new keys or values to a KV cache without touching the rows
     /// already in it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device or is not
-    /// contiguous, the heads or widths differ, the rows run past the end of
-    /// `output`, or a copy fails.
     #[allow(unsafe_code)]
     pub fn write_rows(
         &self,
@@ -589,14 +493,8 @@ impl Backend {
     /// Turns `[heads, rows, cols]` attention scores into probabilities.
     ///
     /// Row `r` belongs to the token at `first_position + r` and column `c` to
-    /// the token at position `c`. A token sees itself and earlier tokens only.
-    /// Scores can be wider than the tokens they hold (sized for the whole KV
-    /// cache, say). Columns past a row's token just come out as 0.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a tensor is on another device, the shapes do not
-    /// agree with `first_position`, or the kernel fails.
+    /// the token at position `c`. Columns past a row's own position, including
+    /// unused cache columns, come out as 0.
     pub fn causal_softmax(
         &self,
         output: &mut Tensor<f32>,
@@ -659,7 +557,7 @@ impl Backend {
         // buffers on this device, plan_gemm checked that their shapes agree,
         // and they stay borrowed until the stream has been drained below.
         unsafe {
-            // cuBLAS's first operand is the right matrix. See plan_gemm.
+            // cuBLAS's first operand is the right matrix. see plan_gemm
             self.cublas.gemm_f32(
                 &call,
                 1.0,
@@ -724,10 +622,6 @@ impl Backend {
 }
 
 /// Gives a tensor a new shape with the same number of elements.
-///
-/// # Errors
-///
-/// Returns an error when `shape` holds a different number of elements.
 pub fn reshape(tensor: Tensor<f32>, shape: &[usize]) -> Result<Tensor<f32>, BackendError> {
     tensor.reshape(shape).map_err(cutile_error)
 }

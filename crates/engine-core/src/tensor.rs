@@ -156,11 +156,6 @@ pub struct OwnedTensor {
 
 impl OwnedTensor {
     /// Decodes a float32 tensor from its little-endian `SafeTensors` bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tensor is not float32 or its byte length does
-    /// not match its shape.
     pub fn to_f32_vec(&self) -> crate::Result<Vec<f32>> {
         if self.descriptor.layout.dtype != DType::Float32 {
             return Err(crate::EngineError::TensorDtype {
@@ -187,11 +182,6 @@ impl OwnedTensor {
     }
 
     /// Decodes an int64 tensor from its little-endian `SafeTensors` bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tensor is not int64 or its byte length does
-    /// not match its shape.
     pub fn to_i64_vec(&self) -> crate::Result<Vec<i64>> {
         if self.descriptor.layout.dtype != DType::Int64 {
             return Err(crate::EngineError::TensorDtype {
@@ -220,11 +210,6 @@ impl OwnedTensor {
     /// Decodes a float32 or bfloat16 tensor as float32 values.
     ///
     /// Every bfloat16 value is also a float32 value, so widening is exact.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tensor has another dtype or its byte length
-    /// does not match its shape.
     pub fn widen_to_f32_vec(&self) -> crate::Result<Vec<f32>> {
         if self.descriptor.layout.dtype != DType::BFloat16 {
             return self.to_f32_vec();
@@ -239,11 +224,6 @@ impl OwnedTensor {
     }
 
     /// Decodes the raw bits of a bfloat16 tensor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tensor is not bfloat16 or its byte length does
-    /// not match its shape.
     pub fn to_bf16_bits(&self) -> crate::Result<Vec<u16>> {
         if self.descriptor.layout.dtype != DType::BFloat16 {
             return Err(crate::EngineError::TensorDtype {

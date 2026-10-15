@@ -13,7 +13,7 @@ use cuda_core::Stream;
 use crate::BackendError;
 use crate::matmul::GemmCall;
 
-// Values from cublas_api.h and library_types.h in CUDA 13.3.
+// values from cublas_api.h and library_types.h in CUDA 13.3
 const CUBLAS_STATUS_SUCCESS: c_int = 0;
 const CUBLAS_OP_N: c_int = 0;
 const CUBLAS_OP_T: c_int = 1;

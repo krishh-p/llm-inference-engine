@@ -94,11 +94,6 @@ pub enum EngineError {
 pub type Result<T> = std::result::Result<T, EngineError>;
 
 /// Reads and deserializes a JSON file.
-///
-/// # Errors
-///
-/// Returns [`EngineError::Io`] when the file cannot be read, or
-/// [`EngineError::Json`] when its contents do not match `T`.
 pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     let path = path.as_ref();
     let bytes = std::fs::read(path).map_err(|source| EngineError::Io {

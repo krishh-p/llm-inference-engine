@@ -14,8 +14,8 @@ pub struct Completion {
 
 /// How long each part of a completion took, and how much device memory it used.
 ///
-/// Times are host wall-clock seconds. Every GPU call waits for its work to
-/// finish, so they include the GPU time too.
+/// Times are host wall-clock seconds. GPU calls are synchronous, so they
+/// include GPU time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metrics {
     /// Reading every weight, widening it to float32 and uploading it. Opening
@@ -46,15 +46,8 @@ pub struct Metrics {
 /// Loads the model on the GPU and greedily completes `prompt`.
 ///
 /// Generation stops at the end-of-sequence token or after `max_new_tokens`.
-/// `warmup_runs` complete the prompt first without being measured, since the
-/// first run also compiles the GPU kernels. The request is checked before the
-/// model is loaded, so a prompt that is empty or too long fails straight away.
-///
-/// # Errors
-///
-/// Returns an error when the prompt cannot be tokenized, the request does not
-/// fit in the context window, a weight cannot be loaded, or the GPU is
-/// unavailable.
+/// `warmup_runs` unmeasured runs come first, since the first run also compiles
+/// the GPU kernels. An empty or too-long prompt fails before the model loads.
 pub fn complete(
     artifacts: &Qwen3Artifacts,
     prompt: &str,
@@ -194,8 +187,7 @@ mod gpu {
     /// See [`Metrics`](super::Metrics) for what each time covers.
     pub(crate) struct Generated {
         pub token_ids: Vec<u32>,
-        /// Buffers allocated while decoding. Should be 0, since every step
-        /// reuses the same workspace
+        /// Buffers allocated while decoding, which should be 0.
         pub decode_allocations: usize,
         pub prefill_seconds: f64,
         pub time_to_first_token_seconds: f64,
@@ -206,11 +198,8 @@ mod gpu {
         pub memory_total_bytes: usize,
     }
 
-    /// Greedily generates up to `max_new_tokens` tokens after the prompt.
-    ///
-    /// The prompt runs once as prefill. After that, each new token runs on
-    /// its own against the caches of everything before it. The result
-    /// includes the end-of-sequence token when one stops generation.
+    /// Greedily generates up to `max_new_tokens` tokens: prefill once, then
+    /// decode one token at a time against the caches.
     pub(crate) fn generate(
         backend: &Backend,
         model: &Model,
@@ -278,10 +267,8 @@ mod gpu {
         })
     }
 
-    /// Greedily generates like [`generate`], but runs the whole sequence again
-    /// for every new token instead of keeping caches.
-    ///
-    /// Much slower, and only here to check the cached path against.
+    /// Like [`generate`], but reruns the whole sequence for every new token
+    /// instead of keeping caches. Only used to check the cached path.
     pub(crate) fn generate_uncached(
         model: &Model,
         prompt_ids: &[u32],

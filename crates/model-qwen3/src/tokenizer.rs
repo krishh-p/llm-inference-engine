@@ -11,11 +11,6 @@ pub struct Qwen3Tokenizer {
 
 impl Qwen3Tokenizer {
     /// Loads a Hugging Face `tokenizer.json` file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file is missing or cannot be parsed by the
-    /// tokenizer library.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if !path.is_file() {
@@ -37,10 +32,6 @@ impl Qwen3Tokenizer {
     }
 
     /// Encodes one prompt without adding special tokens.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the tokenizer cannot encode the prompt.
     pub fn encode(&self, prompt: &str) -> Result<Vec<u32>> {
         self.tokenizer
             .encode(prompt, false)
@@ -52,10 +43,6 @@ impl Qwen3Tokenizer {
     }
 
     /// Turns token IDs back into text, leaving out special tokens.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the tokenizer cannot decode the IDs.
     pub fn decode(&self, token_ids: &[u32]) -> Result<String> {
         self.tokenizer
             .decode(token_ids, true)

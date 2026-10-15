@@ -5,7 +5,7 @@ use engine_core::{FixtureManifest, SafeTensorCatalog, Tolerance};
 use crate::weights::{LayerWeights, load_tensor};
 use crate::{ModelError, Qwen3Artifacts, Qwen3Config, RegressionPromptSet, Result};
 
-// Each fixture tensor is listed with the manifest tolerance that applies to it.
+// each fixture tensor is listed with the manifest tolerance that applies to it
 const PREFILL_FILE: &str = "block_0.safetensors";
 const PREFILL_TENSORS: [(&str, &str); 12] = [
     ("input_norm", "norm"),
@@ -104,11 +104,6 @@ pub(crate) struct ModelFixture {
 ///
 /// The prompt is run first, then one more token is decoded against the cache
 /// that run left behind. Both passes are checked through the whole layer.
-///
-/// # Errors
-///
-/// Returns an error when a fixture or weight cannot be loaded, the GPU is
-/// unavailable, or a tensor is outside its fixture tolerance.
 pub fn verify_layer_0(
     artifacts: &Qwen3Artifacts,
     fixture_dir: impl AsRef<Path>,
@@ -145,11 +140,6 @@ pub fn verify_layer_0(
 ///
 /// It then decodes the first generated token against the caches the prompt
 /// left in all 28 layers and compares those logits too.
-///
-/// # Errors
-///
-/// Returns an error when a fixture or weight cannot be loaded, the GPU is
-/// unavailable, or a tensor is outside its fixture tolerance.
 pub fn verify_model(
     artifacts: &Qwen3Artifacts,
     fixture_dir: impl AsRef<Path>,
@@ -193,13 +183,6 @@ pub fn verify_model(
 /// end-of-sequence token, and checks that generation stops right after it.
 /// Every run is repeated without caches, and both must pick the same tokens.
 /// The decode steps of every cached run must not allocate any buffers.
-///
-/// # Errors
-///
-/// Returns an error when a weight cannot be loaded, the GPU is unavailable,
-/// there is no first prompt with at least two expected tokens, any run
-/// generates different tokens, the cached and uncached runs disagree, or a
-/// decode step allocates.
 pub fn verify_generation(
     artifacts: &Qwen3Artifacts,
     prompts: &RegressionPromptSet,

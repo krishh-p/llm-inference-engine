@@ -19,11 +19,6 @@ pub(crate) struct GemmCall {
 /// transpose. Asking it for `output^T = right^T @ left^T` therefore writes the
 /// row-major result directly. The operands swap places: cuBLAS's `A` is `right`
 /// and its `B` is `left`, and only `A` is ever transposed.
-///
-/// # Errors
-///
-/// Returns an error when a shape is not a non-empty matrix or the three shapes
-/// do not agree.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn plan_gemm(
     left: &[i32],
@@ -49,8 +44,8 @@ pub(crate) fn plan_gemm(
         return Err(mismatch());
     }
 
-    // The mathematical right operand is [inner, cols]. When it is stored
-    // transposed, its buffer is [cols, inner].
+    // the mathematical right operand is [inner, cols]. when it is stored
+    // transposed, its buffer is [cols, inner]
     let expected_right = if right_transposed {
         [cols, inner]
     } else {
@@ -102,12 +97,8 @@ struct AttentionShapes {
 /// `q` is `[heads, rows, head_dim]`, `k` is a key cache
 /// `[kv_heads, capacity, head_dim]`, and `scores` is `[heads, rows, capacity]`.
 /// Only the first `keys` cached keys are read, and only the first `keys`
-/// columns of each row of scores are written.
-///
-/// # Errors
-///
-/// Returns an error when the shapes do not agree or `keys` is zero or more
-/// than the cache holds.
+/// columns of each row of scores are written. `keys` must be between 1 and
+/// `capacity`.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn plan_attention_scores(
     q: &[i32],
@@ -148,11 +139,7 @@ pub(crate) fn plan_attention_scores(
 /// `probs` is `[heads, rows, capacity]`, `v` is a value cache
 /// `[kv_heads, capacity, head_dim]`, and `output` is `[heads, rows, head_dim]`.
 /// Only the first `keys` columns of probabilities and cached values are read.
-///
-/// # Errors
-///
-/// Returns an error when the shapes do not agree or `keys` is zero or more
-/// than the cache holds.
+/// `keys` must be between 1 and `capacity`.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) fn plan_attention_mix(
     probs: &[i32],
@@ -343,7 +330,7 @@ mod tests {
 
     #[test]
     fn rejects_shapes_that_only_fit_the_other_layout() {
-        // [4, 3] is the transposed layout, so the plain product must refuse it.
+        // [4, 3] is the transposed layout, so the plain product must refuse it
         assert!(matches!(
             plan_gemm(&[2, 3], &[4, 3], &[2, 4], false),
             Err(BackendError::MatmulShape { .. })

@@ -33,7 +33,7 @@ pub(crate) struct RopeFixtures {
 /// Column `i` turns at frequency `theta^(-i / half)`, so the first columns
 /// turn quickly and the last ones slowly. The arithmetic is float32 to follow
 /// the Python reference.
-// Positions and column indexes are far below 2^24, so float32 holds them exactly.
+// positions and column indexes are far below 2^24, so float32 holds them exactly
 #[allow(clippy::cast_precision_loss)]
 #[must_use]
 pub fn rope_tables(positions: &[u32], head_dim: usize, theta: f32) -> (Vec<f32>, Vec<f32>) {

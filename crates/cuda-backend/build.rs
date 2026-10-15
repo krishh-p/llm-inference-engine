@@ -1,4 +1,4 @@
-// Links cuBLAS from the CUDA toolkit when the `cuda` feature is on.
+// links cuBLAS from the CUDA toolkit when the `cuda` feature is on
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_TOOLKIT_PATH");

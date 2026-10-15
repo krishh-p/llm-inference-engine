@@ -30,5 +30,7 @@ tokenizers = { version = "=0.22.1", default-features = false, features = ["fancy
 unsafe_code = "warn"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# fallible operations are documented once on the type, not on every method
+missing_errors_doc = "allow"

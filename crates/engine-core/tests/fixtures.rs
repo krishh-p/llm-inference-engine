@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use engine_core::{DType, FixtureManifest, SafeTensorCatalog};
 
-// The tensors the Rust checks read from each fixture file.
+// the tensors the Rust checks read from each fixture file
 const REQUIRED_TENSORS: [(&str, &[&str]); 5] = [
     (
         "block_0.safetensors",

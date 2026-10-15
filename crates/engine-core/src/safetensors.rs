@@ -17,11 +17,6 @@ pub struct SafeTensorCatalog {
 
 impl SafeTensorCatalog {
     /// Opens every `.safetensors` file in a directory and indexes its tensors.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be read, contains no
-    /// `SafeTensors` files, or contains invalid or duplicate tensors.
     pub fn open_dir(directory: impl AsRef<Path>) -> Result<Self> {
         let directory = directory.as_ref();
         let entries = fs::read_dir(directory).map_err(|source| EngineError::Io {
@@ -51,11 +46,6 @@ impl SafeTensorCatalog {
     }
 
     /// Opens a set of `SafeTensors` files and builds one combined tensor index.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a file cannot be read, is not valid `SafeTensors`,
-    /// or defines a tensor name already present in another file.
     pub fn open_files(files: impl IntoIterator<Item = PathBuf>) -> Result<Self> {
         let mut catalog = Self {
             files: Vec::new(),
@@ -128,11 +118,6 @@ impl SafeTensorCatalog {
     }
 
     /// Copies one indexed tensor into owned host memory.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tensor does not exist or its source file can
-    /// no longer be read as valid `SafeTensors`.
     pub fn load(&self, name: &str) -> Result<OwnedTensor> {
         let descriptor = self
             .get(name)

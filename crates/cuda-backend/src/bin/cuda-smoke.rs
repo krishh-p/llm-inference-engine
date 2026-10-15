@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
-// The committed fixtures, located from this crate so the working directory does
-// not matter. A different directory can be passed as the first argument.
+// the committed fixtures, located from this crate so the working directory does
+// not matter. a different directory can be passed as the first argument
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures");
 
 fn main() -> ExitCode {

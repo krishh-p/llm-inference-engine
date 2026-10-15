@@ -141,7 +141,7 @@ mod kernels {
                 [block.0, block.1, 1i32 - block.2],
             );
 
-            // The tables have one row per token, shared by every head.
+            // the tables have one row per token, shared by every head
             let cos: Tile<f32, { [1, HALF] }> = load_tile(cos, shape![1, HALF], [block.1, 0i32]);
             let sin: Tile<f32, { [1, HALF] }> = load_tile(sin, shape![1, HALF], [block.1, 0i32]);
             let cos = cos.reshape(shape![1, 1, HALF]);

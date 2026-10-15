@@ -18,14 +18,14 @@ use crate::{
 };
 
 const VECTOR_MAX_ABS_ERROR: f32 = 1.0e-6;
-// The matmul inputs are small whole numbers, so every product is exact in float32.
+// the matmul inputs are small whole numbers, so every product is exact in float32
 const MATMUL_MAX_ABS_ERROR: f32 = 1.0e-6;
-// A 16 x 16 matrix is exactly one vector-add tile.
+// a 16 x 16 matrix is exactly one vector-add tile
 const KERNEL_MATMUL_SIZE: usize = 16;
 const F32_TOLERANCE: f32 = 1.0e-5;
 const BF16_TOLERANCE: f32 = 1.0e-2;
-// One prompt-sized input, where launch overhead dominates, and one large
-// enough for the time to go to reading and writing memory.
+// one prompt-sized input, where launch overhead dominates, and one large
+// enough for the time to go to reading and writing memory
 const FUSED_NORM_SHAPES: [[usize; 2]; 2] = [[5, 2048], [4096, 2048]];
 const BENCHMARK_WARMUP_ITERATIONS: usize = 10;
 const BENCHMARK_ITERATIONS: usize = 100;
@@ -43,8 +43,8 @@ impl RmsNormParams {
         Self {
             rows,
             hidden_size,
-            // The tile width is rounded up to a power of two. The padding adds
-            // nothing to the sum, and the mean still divides by the real width.
+            // the tile width is rounded up to a power of two. the padding adds
+            // nothing to the sum, and the mean still divides by the real width
             tile_hidden_size: hidden_size.next_power_of_two(),
             inverse_hidden_size: inverse_hidden_size(hidden_size),
             epsilon,
@@ -361,8 +361,8 @@ fn run_fused_norm_case(
         )
     })?;
 
-    // Unfused moves five matrices: two read and one written by the add, then
-    // one read and one written by the norm. Fused reads two and writes two.
+    // unfused moves five matrices: two read and one written by the add, then
+    // one read and one written by the norm. fused reads two and writes two
     let matrix_bytes = elements * size_of::<f32>();
     let unfused = summarize(unfused, matrix_bytes * 5, 2);
     let fused = summarize(fused, matrix_bytes * 4, 1);
@@ -383,8 +383,8 @@ fn run_fused_norm_case(
 fn run_rope_suite(backend: &Backend, fixtures: &RopeFixtures) -> Result<RopeResult, BackendError> {
     let tables = check_tables(fixtures)?;
 
-    // The kernel is checked with the reference tables, so its tolerance does
-    // not have to absorb the difference between the two sets of tables.
+    // the kernel is checked with the reference tables, so its tolerance does
+    // not have to absorb the difference between the two sets of tables
     let rows = fixtures.positions.len();
     let half = fixtures.head_dim / 2;
     let cos = backend.upload(&fixtures.cos, &[rows, half])?;
@@ -429,7 +429,7 @@ fn run_rope_case(
 
 fn run_matmul_suite(backend: &Backend) -> Result<MatmulResult, BackendError> {
     // Non-square shapes with distinct values, so a swapped or transposed
-    // operand cannot produce the right answer by accident.
+    // operand cannot produce the right answer by accident
     Ok(MatmulResult {
         cases: vec![
             run_matmul_case(backend, "plain_2x3_times_3x4", 2, 3, 4, false)?,
@@ -672,7 +672,7 @@ fn percentile(sorted: &[f64], percentile: usize) -> f64 {
 }
 
 fn logical_bytes(rows: usize, hidden_size: usize, element_bytes: usize) -> usize {
-    // Each row reads its input and weight once, then writes one output row.
+    // each row reads its input and weight once, then writes one output row
     rows * hidden_size * element_bytes * 3
 }
 

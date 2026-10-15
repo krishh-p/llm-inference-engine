@@ -61,12 +61,8 @@ impl Tolerance {
         error <= self.atol + self.rtol * f64::from(expected).abs()
     }
 
-    /// Returns the largest absolute error between `actual` and `expected`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error naming `name` when the lengths differ or any value is
-    /// outside the tolerance.
+    /// Returns the largest absolute error between `actual` and `expected`, or
+    /// an error naming `name` if any value is outside the tolerance.
     pub fn compare(self, name: &str, actual: &[f32], expected: &[f32]) -> Result<f32> {
         let mut max_abs_error = 0.0_f32;
         let mut within_tolerance = actual.len() == expected.len();
@@ -102,11 +98,6 @@ pub struct FixtureValidation {
 
 impl FixtureManifest {
     /// Loads a version 1 fixture manifest.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be read, contains invalid JSON, or
-    /// uses an unsupported manifest version.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let manifest: Self = read_json(path)?;
         if manifest.format_version != 1 {
@@ -116,10 +107,6 @@ impl FixtureManifest {
     }
 
     /// Looks up the `{name}_atol` and `{name}_rtol` pair recorded for a file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file or either value is not in the manifest.
     pub fn tolerance(&self, file: &str, name: &str) -> Result<Tolerance> {
         let tolerances = self.files.get(file).map(|file| &file.tolerances);
         let value = |suffix: &str| {
@@ -138,11 +125,6 @@ impl FixtureManifest {
     }
 
     /// Checks every fixture's size, checksum, and tensor metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a fixture is missing or differs from the
-    /// information recorded in the manifest.
     pub fn validate_files(&self, directory: impl AsRef<Path>) -> Result<FixtureValidation> {
         let directory = directory.as_ref();
         let mut tensor_count = 0;

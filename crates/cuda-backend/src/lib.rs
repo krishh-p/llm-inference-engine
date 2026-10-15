@@ -255,11 +255,6 @@ pub enum BackendError {
 }
 
 /// Finds the first GPU and runs the verified smoke kernels.
-///
-/// # Errors
-///
-/// Returns an error when a fixture is invalid, CUDA is unavailable or a
-/// kernel fails verification.
 pub fn run_smoke(fixture_dir: impl AsRef<Path>) -> Result<SmokeReport, BackendError> {
     let fixture_dir = fixture_dir.as_ref();
     check_element_count(VECTOR_ELEMENTS)?;
@@ -279,8 +274,8 @@ fn check_rms_norm_shape(rows: usize, hidden_size: usize) -> Result<(), BackendEr
     if rows == 0 || hidden_size == 0 {
         return Err(BackendError::InvalidRmsNormShape { rows, hidden_size });
     }
-    // This kernel maps one complete row to a tile. Widths 128, 2048 and 2560
-    // have been run on the GPU. Other multiples of 32 are accepted but untested.
+    // this kernel maps one complete row to a tile. widths 128, 2048 and 2560
+    // have been run on the GPU. other multiples of 32 are accepted but untested
     if !hidden_size.is_multiple_of(RMS_NORM_HIDDEN_SIZE_MULTIPLE)
         || hidden_size > MAX_RMS_NORM_HIDDEN_SIZE
     {
