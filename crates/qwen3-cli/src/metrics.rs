@@ -58,6 +58,9 @@ pub(crate) fn bench_json(bench: &DecodeBench, dtype: &str) -> Value {
                 "decode_step_max_ms": percentile(steps, 100).map(milliseconds),
                 "decode_tokens_per_second": per_second(steps.len(), steps.iter().sum()),
                 "decode_allocations": context.decode_allocations,
+                "kernel_launches_per_step": per_step(context.decode_kernel_launches, steps.len()),
+                "cublas_calls_per_step": per_step(context.decode_cublas_calls, steps.len()),
+                "host_waits_per_step": per_step(context.decode_host_waits, steps.len()),
                 "decode_step_ms": steps.iter().copied().map(milliseconds).collect::<Vec<_>>(),
             })
         })
@@ -91,6 +94,12 @@ fn percentile(values: &[f64], percent: usize) -> Option<f64> {
 #[allow(clippy::cast_precision_loss)]
 fn per_second(count: usize, seconds: f64) -> Option<f64> {
     (count > 0 && seconds > 0.0).then(|| count as f64 / seconds)
+}
+
+// every step runs the same operations, so a fraction would mean the steps differed
+#[allow(clippy::cast_precision_loss)]
+fn per_step(count: usize, steps: usize) -> Option<f64> {
+    (steps > 0).then(|| count as f64 / steps as f64)
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -132,5 +141,12 @@ mod tests {
         assert_eq!(per_second(10, 2.0), Some(5.0));
         assert_eq!(per_second(0, 2.0), None);
         assert_eq!(per_second(10, 0.0), None);
+    }
+
+    #[test]
+    fn counts_are_averaged_over_the_steps() {
+        assert_eq!(per_step(730, 2), Some(365.0));
+        assert_eq!(per_step(731, 2), Some(365.5));
+        assert_eq!(per_step(5, 0), None);
     }
 }

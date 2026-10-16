@@ -183,6 +183,10 @@ exactly that many tokens. It writes `results/rust-bench-*.json` with the min,
 median, p95 and max step, decode tokens per second, prefill time, and every
 step's time, plus the same environment and git details as above.
 
+It also counts each step's cuTile kernel launches, cuBLAS calls, and the times
+the host waits for the GPU to finish. The backend is still synchronous, so every
+cuTile launch and each group of cuBLAS calls is followed by a host wait.
+
 The warmup is 16 steps because cuTile compiles a kernel again whenever an
 integer argument's largest power-of-two divisor changes, up to 16. The softmax
 takes the token's position, so the first steps after a prefill each hit one of

@@ -380,6 +380,13 @@ fn bench(
             context["prefill_seconds"],
             context["decode_allocations"],
         );
+        println!(
+            "context_tokens={}: kernel_launches_per_step={}, cublas_calls_per_step={}, host_waits_per_step={}",
+            context["context_tokens"],
+            context["kernel_launches_per_step"],
+            context["cublas_calls_per_step"],
+            context["host_waits_per_step"],
+        );
     }
 
     if let Some(path) = output {

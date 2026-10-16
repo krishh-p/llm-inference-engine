@@ -30,6 +30,13 @@ pub struct Backend {
     finished: Event,
     /// How many device or host buffers this backend has allocated.
     allocations: AtomicUsize,
+    /// How many of the kernels in `cuda-kernels` this backend has launched.
+    kernel_launches: AtomicUsize,
+    /// How many cuBLAS functions this backend has called. cuBLAS launches its
+    /// own kernels, one or more per call, and those aren't in `kernel_launches`.
+    cublas_calls: AtomicUsize,
+    /// How many times the host has blocked until the stream was idle.
+    host_waits: AtomicUsize,
 }
 
 impl Backend {
@@ -46,6 +53,9 @@ impl Backend {
             cublas,
             finished,
             allocations: AtomicUsize::new(0),
+            kernel_launches: AtomicUsize::new(0),
+            cublas_calls: AtomicUsize::new(0),
+            host_waits: AtomicUsize::new(0),
         })
     }
 
@@ -53,6 +63,21 @@ impl Backend {
     /// [`Backend::download`] have allocated so far.
     pub fn allocations(&self) -> usize {
         self.allocations.load(Ordering::Relaxed)
+    }
+
+    /// How many cuTile kernels the operations have launched so far.
+    pub fn kernel_launches(&self) -> usize {
+        self.kernel_launches.load(Ordering::Relaxed)
+    }
+
+    /// How many cuBLAS matrix multiplications the operations have queued so far.
+    pub fn cublas_calls(&self) -> usize {
+        self.cublas_calls.load(Ordering::Relaxed)
+    }
+
+    /// How many times the operations have waited for the GPU so far.
+    pub fn host_waits(&self) -> usize {
+        self.host_waits.load(Ordering::Relaxed)
     }
 
     /// Device memory in use and in total, in bytes. This is device-wide, so it
@@ -72,9 +97,7 @@ impl Backend {
     /// Copies row-major float32 values to the device.
     pub fn upload(&self, values: &[f32], shape: &[usize]) -> Result<Tensor<f32>, BackendError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        api::copy_host_vec_to_device(&Arc::new(values.to_vec()))
-            .sync_on(&self.stream)
-            .map_err(cutile_error)?
+        self.run(api::copy_host_vec_to_device(&Arc::new(values.to_vec())))?
             .reshape(shape)
             .map_err(cutile_error)
     }
@@ -82,19 +105,15 @@ impl Backend {
     /// Allocates a float32 tensor of zeros on the device.
     pub fn zeros(&self, shape: &[usize]) -> Result<Tensor<f32>, BackendError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
-        api::zeros::<f32>(shape)
-            .sync_on(&self.stream)
-            .map_err(cutile_error)
+        self.run(api::zeros::<f32>(shape))
     }
 
     /// Copies a tensor back to host memory in row-major order.
     pub fn download(&self, tensor: &Tensor<f32>) -> Result<Vec<f32>, BackendError> {
         self.allocations.fetch_add(1, Ordering::Relaxed);
         // cuTile's host copy takes ownership, so it is given a device copy
-        let copy = tensor.dup().sync_on(&self.stream).map_err(cutile_error)?;
-        copy.to_host_vec()
-            .sync_on(&self.stream)
-            .map_err(cutile_error)
+        let copy = self.run(tensor.dup())?;
+        self.run(copy.to_host_vec())
     }
 
     /// Like [`Backend::download`], but into an existing buffer, so nothing is
@@ -238,10 +257,11 @@ impl Backend {
         self.check_tensors(&[("left", left), ("right", right), ("output", &*output)])?;
 
         // elements past the real width are padding and are never stored
-        let _ = add_f32(output.partition([1, cols.next_power_of_two()]), left, right)
-            .sync_on(&self.stream)
-            .map_err(cutile_error)?;
-        Ok(())
+        self.launch(add_f32(
+            output.partition([1, cols.next_power_of_two()]),
+            left,
+            right,
+        ))
     }
 
     /// Computes `output = silu(gate) * up` for matrices of the same shape.
@@ -256,10 +276,11 @@ impl Backend {
         expect_shape("silu_mul", "output", output.shape(), &[rows, cols])?;
         self.check_tensors(&[("gate", gate), ("up", up), ("output", &*output)])?;
 
-        let _ = silu_mul_f32(output.partition([1, cols.next_power_of_two()]), gate, up)
-            .sync_on(&self.stream)
-            .map_err(cutile_error)?;
-        Ok(())
+        self.launch(silu_mul_f32(
+            output.partition([1, cols.next_power_of_two()]),
+            gate,
+            up,
+        ))
     }
 
     /// Normalizes each row of a `[rows, hidden_size]` matrix and scales it by `weight`.
@@ -278,16 +299,13 @@ impl Backend {
 
         // the tile width is rounded up to a power of two. the padding adds
         // nothing to the sum, and the mean still divides by the real width
-        let _ = rms_norm_f32(
+        self.launch(rms_norm_f32(
             output.partition([1, hidden_size.next_power_of_two()]),
             input,
             weight,
             inverse_hidden_size(hidden_size),
             epsilon,
-        )
-        .sync_on(&self.stream)
-        .map_err(cutile_error)?;
-        Ok(())
+        ))
     }
 
     /// Normalizes every head's vector in a `[heads, rows, head_dim]` tensor
@@ -310,16 +328,13 @@ impl Backend {
         expect_shape("rms_norm_heads", "weight", weight.shape(), &[head_dim])?;
         self.check_tensors(&[("input", input), ("weight", weight), ("output", &*output)])?;
 
-        let _ = rms_norm_heads_f32(
+        self.launch(rms_norm_heads_f32(
             output.partition([1, 1, head_dim.next_power_of_two()]),
             input,
             weight,
             inverse_hidden_size(head_dim),
             epsilon,
-        )
-        .sync_on(&self.stream)
-        .map_err(cutile_error)?;
-        Ok(())
+        ))
     }
 
     /// Computes `sum = left + right` and the `RMSNorm` of that sum with one kernel.
@@ -355,7 +370,7 @@ impl Backend {
         ])?;
 
         let tile = [1, hidden_size.next_power_of_two()];
-        let _ = add_rms_norm_f32(
+        self.launch(add_rms_norm_f32(
             sum.partition(tile),
             output.partition(tile),
             left,
@@ -363,10 +378,7 @@ impl Backend {
             weight,
             inverse_hidden_size(hidden_size),
             epsilon,
-        )
-        .sync_on(&self.stream)
-        .map_err(cutile_error)?;
-        Ok(())
+        ))
     }
 
     /// Rotates `[heads, rows, head_dim]` vectors by their token positions.
@@ -393,10 +405,7 @@ impl Backend {
             ("output", &*output),
         ])?;
 
-        let _ = rope_f32(output.partition([1, 1, half]), input, cos, sin)
-            .sync_on(&self.stream)
-            .map_err(cutile_error)?;
-        Ok(())
+        self.launch(rope_f32(output.partition([1, 1, half]), input, cos, sin))
     }
 
     /// Splits `[rows, heads * head_dim]` into `[heads, rows, head_dim]`, so
@@ -415,10 +424,7 @@ impl Backend {
         )?;
         self.check_tensors(&[("input", input), ("output", &*output)])?;
 
-        let _ = split_heads_f32(output.partition([1, 1, head_dim]), input)
-            .sync_on(&self.stream)
-            .map_err(cutile_error)?;
-        Ok(())
+        self.launch(split_heads_f32(output.partition([1, 1, head_dim]), input))
     }
 
     /// Merges `[heads, rows, head_dim]` back into `[rows, heads * head_dim]`.
@@ -436,10 +442,7 @@ impl Backend {
         )?;
         self.check_tensors(&[("input", input), ("output", &*output)])?;
 
-        let _ = merge_heads_f32(output.partition([1, head_dim]), input)
-            .sync_on(&self.stream)
-            .map_err(cutile_error)?;
-        Ok(())
+        self.launch(merge_heads_f32(output.partition([1, head_dim]), input))
     }
 
     /// Copies every head of a `[heads, rows, width]` tensor into a
@@ -527,14 +530,11 @@ impl Backend {
 
         // the causal mask also hides unused cache columns and the padding
         // up to the tile width
-        let _ = causal_softmax_f32(
+        self.launch(causal_softmax_f32(
             output.partition([1, 1, cols.next_power_of_two()]),
             scores,
             first_position,
-        )
-        .sync_on(&self.stream)
-        .map_err(cutile_error)?;
-        Ok(())
+        ))
     }
 
     #[allow(unsafe_code)]
@@ -553,6 +553,7 @@ impl Backend {
             right_transposed,
         )?;
 
+        self.cublas_calls.fetch_add(1, Ordering::Relaxed);
         // SAFETY: the three tensors were checked to be contiguous float32
         // buffers on this device, plan_gemm checked that their shapes agree,
         // and they stay borrowed until the stream has been drained below.
@@ -585,6 +586,7 @@ impl Backend {
             let right_offset = (head / plan.group) * plan.right_elements * size_of::<f32>();
             let output_offset = head * plan.output_elements * size_of::<f32>();
 
+            self.cublas_calls.fetch_add(1, Ordering::Relaxed);
             // SAFETY: the caller checked that the three tensors are contiguous
             // float32 buffers on this device, the plan checked that every head
             // lies inside its tensor, and the tensors stay borrowed until the
@@ -614,8 +616,23 @@ impl Backend {
         Ok(())
     }
 
+    /// Launches one of the kernels in `cuda-kernels` and waits for it.
+    fn launch(&self, kernel: impl DeviceOp) -> Result<(), BackendError> {
+        self.kernel_launches.fetch_add(1, Ordering::Relaxed);
+        let _ = self.run(kernel)?;
+        Ok(())
+    }
+
+    /// Runs cuTile work on the stream and waits for it. `sync_on` blocks until
+    /// the whole stream is idle, not just this work.
+    fn run<T>(&self, work: impl DeviceOp<Output = T>) -> Result<T, BackendError> {
+        self.host_waits.fetch_add(1, Ordering::Relaxed);
+        work.sync_on(&self.stream).map_err(cutile_error)
+    }
+
     /// Blocks until the stream has finished everything queued on it.
     fn wait_for_stream(&self) -> Result<(), BackendError> {
+        self.host_waits.fetch_add(1, Ordering::Relaxed);
         self.finished.record(&self.stream).map_err(cuda_error)?;
         self.finished.synchronize().map_err(cuda_error)
     }

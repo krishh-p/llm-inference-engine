@@ -24,6 +24,12 @@ pub struct ContextBench {
     pub decode_step_seconds: Vec<f64>,
     /// should be 0
     pub decode_allocations: usize,
+    /// cuTile kernels launched over all the measured steps
+    pub decode_kernel_launches: usize,
+    /// cuBLAS calls over all the measured steps
+    pub decode_cublas_calls: usize,
+    /// times the host waited for the GPU over all the measured steps
+    pub decode_host_waits: usize,
 }
 
 /// Times decode steps at each context length, after filling the cache by
@@ -157,6 +163,9 @@ fn bench_on_gpu(
 
         let mut decode_step_seconds = Vec::with_capacity(measured_steps);
         let allocations_before = backend.allocations();
+        let kernel_launches_before = backend.kernel_launches();
+        let cublas_calls_before = backend.cublas_calls();
+        let host_waits_before = backend.host_waits();
         for _ in 0..measured_steps {
             let step_started = Instant::now();
             let logits =
@@ -170,6 +179,9 @@ fn bench_on_gpu(
             prefill_seconds,
             decode_step_seconds,
             decode_allocations: backend.allocations() - allocations_before,
+            decode_kernel_launches: backend.kernel_launches() - kernel_launches_before,
+            decode_cublas_calls: backend.cublas_calls() - cublas_calls_before,
+            decode_host_waits: backend.host_waits() - host_waits_before,
         });
     }
 
